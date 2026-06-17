@@ -649,9 +649,13 @@ fn default_tcp_upgrade_methods() -> Vec<String> {
 
 impl SSRealmConfig {
     fn into_realm_config(self) -> RealmConfig {
-        let (self_signed, pin_sha256) = match self.quic_tls {
-            Some(t) => (t.self_signed.unwrap_or(false), t.pin_sha256),
-            None => (true, None),
+        let (self_signed, pin_sha256, insecure) = match self.quic_tls {
+            Some(t) => (
+                t.self_signed.unwrap_or(false),
+                t.pin_sha256,
+                t.insecure.unwrap_or(false),
+            ),
+            None => (true, None, false),
         };
         let (tcp_upgrade, tcp_upgrade_methods, tcp_upgrade_external_port) = match self.tcp_upgrade {
             Some(u) => (
@@ -672,6 +676,7 @@ impl SSRealmConfig {
             lport: self.lport,
             self_signed,
             pin_sha256,
+            insecure,
             tcp_upgrade,
             tcp_upgrade_methods,
             tcp_upgrade_external_port,
@@ -687,7 +692,7 @@ impl SSRealmConfig {
             quic_tls: Some(SSRealmTlsConfig {
                 self_signed: Some(r.self_signed),
                 pin_sha256: r.pin_sha256.clone(),
-                insecure: None,
+                insecure: Some(r.insecure),
             }),
             tcp_upgrade: Some(SSRealmTcpUpgrade {
                 enable: Some(r.tcp_upgrade),
@@ -711,8 +716,13 @@ pub struct RealmConfig {
     pub lport: Option<u16>,
     /// Server: present a self-signed carrier certificate.
     pub self_signed: bool,
-    /// Client: pinned SHA-256 of the server certificate (hex or base64).
+    /// Client: pinned SHA-256 of the server certificate (64 hex chars).
     pub pin_sha256: Option<String>,
+    /// Client: skip QUIC-carrier certificate verification entirely. The
+    /// shadowsocks AEAD layer remains the real end-to-end authentication, so the
+    /// carrier TLS only provides transport encryption (matches Hysteria's
+    /// `insecure`). Mutually exclusive with `pin_sha256`; `pin_sha256` wins.
+    pub insecure: bool,
     /// PATH B (UPnP/NAT-PMP direct-TCP) enabled.
     pub tcp_upgrade: bool,
     /// PATH B methods to try, in order (e.g. `["upnp", "natpmp"]`).
@@ -3634,6 +3644,27 @@ mod tests {
         assert_eq!(realm.pin_sha256.as_deref(), Some("abcd"));
         assert!(realm.prefer_tcp);
         assert!(!realm.self_signed);
+        assert!(!realm.insecure);
+    }
+
+    #[cfg(feature = "aead-cipher")]
+    #[test]
+    fn parses_realm_insecure() {
+        let json = r#"{
+            "server": "0.0.0.0",
+            "server_port": 8388,
+            "password": "pwd",
+            "method": "aes-256-gcm",
+            "realm": {
+                "rendezvous": "realm://tok@realm.example.com/cabin",
+                "quic_tls": { "insecure": true }
+            }
+        }"#;
+        let cfg = Config::load_from_str(json, ConfigType::Local).expect("parse realm insecure");
+        let realm = cfg.server[0].realm.as_ref().expect("realm config present");
+        // The bug: `insecure` used to be dropped during parsing.
+        assert!(realm.insecure, "quic_tls.insecure must propagate to RealmConfig");
+        assert_eq!(realm.pin_sha256, None);
     }
 
     #[cfg(feature = "aead-cipher")]

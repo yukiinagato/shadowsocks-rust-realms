@@ -174,6 +174,7 @@ impl ServerIdent {
         &self,
         context: shadowsocks::context::SharedContext,
     ) -> std::io::Result<Arc<shadowsocks::realm::RealmClient>> {
+        use shadowsocks::realm::shadowsocks_realm::quic::ClientTls;
         use shadowsocks::realm::shadowsocks_realm::session::ClientParams;
 
         let mut guard = self.realm_client.lock().await;
@@ -187,11 +188,20 @@ impl ServerIdent {
             .as_ref()
             .ok_or_else(|| std::io::Error::other("server is not configured for realm transport"))?;
 
-        let pin = parse_pin_sha256(realm_cfg.pin_sha256.as_deref())?;
+        // Pin takes precedence; otherwise honour `insecure`; otherwise error.
+        let tls = match (realm_cfg.pin_sha256.as_deref(), realm_cfg.insecure) {
+            (Some(pin), _) => ClientTls::Pin(parse_pin_sha256(Some(pin))?),
+            (None, true) => ClientTls::Insecure,
+            (None, false) => {
+                return Err(std::io::Error::other(
+                    "realm client requires quic_tls.pin_sha256 (64 hex) or quic_tls.insecure = true",
+                ));
+            }
+        };
         let params = ClientParams {
             rendezvous: realm_cfg.rendezvous.clone(),
             stun_servers: realm_cfg.stun_servers.clone(),
-            pin,
+            tls,
             lport: realm_cfg.lport,
             punch_deadline: Duration::from_secs(10),
         };

@@ -166,7 +166,7 @@ async fn shadowsocks_over_full_realm_stack() {
             ClientParams {
                 rendezvous,
                 stun_servers,
-                pin,
+                tls: shadowsocks_realm::quic::ClientTls::Pin(pin),
                 lport: None,
                 punch_deadline: Duration::from_secs(8),
             },

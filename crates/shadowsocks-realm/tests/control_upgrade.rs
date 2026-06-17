@@ -66,7 +66,7 @@ async fn control_stream_drives_path_upgrade_and_fallback() {
     });
 
     // Client: accept the control stream, drive the PathManager.
-    let carrier = quic::connect_client(client_sock, pin).await.unwrap();
+    let carrier = quic::connect_client(client_sock, quic::ClientTls::Pin(pin)).await.unwrap();
     let conn = carrier.connection().clone();
     let pm = PathManager::new(true);
 

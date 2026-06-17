@@ -32,8 +32,9 @@ pub struct ClientParams {
     pub rendezvous: String,
     /// Additional STUN servers (merged with any in the URL).
     pub stun_servers: Vec<String>,
-    /// SHA-256 pin of the server's self-signed certificate.
-    pub pin: [u8; 32],
+    /// How to verify the QUIC carrier certificate (pin its SHA-256, or accept
+    /// any in `Insecure` mode).
+    pub tls: crate::quic::ClientTls,
     /// Optional fixed local UDP port.
     pub lport: Option<u16>,
     /// Punch deadline.
@@ -96,7 +97,7 @@ pub async fn client_connect(params: ClientParams) -> Result<QuicCarrier> {
     let punched =
         PunchedSocket::connect(socket, &peer_addrs, &keys.nonce, &keys.obfs, params.punch_deadline)
             .await?;
-    quic::connect_client(punched, params.pin).await
+    quic::connect_client(punched, params.tls).await
 }
 
 /// Register a realm and accept a single client, returning its QUIC carrier.

@@ -254,6 +254,21 @@ async fn run_realm_server(
 
     let context = Context::new_shared(ServerType::Server);
 
+    // Honour the configured TLS mode as far as it is implemented today.
+    if !realm_cfg.self_signed {
+        log::warn!(
+            "realm: quic_tls.self_signed=false requested, but ACME/real-cert is not implemented yet; \
+             falling back to a self-signed carrier certificate"
+        );
+    }
+    if realm_cfg.tcp_upgrade {
+        log::info!(
+            "realm: tcp_upgrade (PATH B direct-TCP via {:?}) is configured but not yet implemented; \
+             traffic stays on the QUIC carrier (PATH A)",
+            realm_cfg.tcp_upgrade_methods
+        );
+    }
+
     // Self-signed carrier certificate; print its pin so the client can pin it.
     let (cert, key) = tls::generate_self_signed(vec!["realm".to_owned()])
         .map_err(|e| io::Error::other(format!("realm self-signed cert: {e}")))?;

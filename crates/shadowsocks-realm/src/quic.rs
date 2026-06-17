@@ -72,12 +72,26 @@ fn endpoint_from_punched(
     Ok((endpoint, peer))
 }
 
+/// How the client verifies the QUIC carrier's TLS certificate.
+#[derive(Debug, Clone, Copy)]
+pub enum ClientTls {
+    /// Pin the server certificate by its SHA-256 fingerprint (default, secure).
+    Pin([u8; 32]),
+    /// Accept any certificate — transport encryption only. The shadowsocks AEAD
+    /// layer remains the real end-to-end authentication (Hysteria `insecure`).
+    Insecure,
+}
+
 /// Take the **client** role over a punched socket, verifying the server's
-/// certificate against `pin` (its SHA-256 fingerprint).
-pub async fn connect_client(punched: PunchedSocket, pin: [u8; 32]) -> Result<QuicCarrier> {
+/// certificate per `tls` (pin its SHA-256 fingerprint, or accept any in
+/// `Insecure` mode).
+pub async fn connect_client(punched: PunchedSocket, tls_mode: ClientTls) -> Result<QuicCarrier> {
     let (mut endpoint, peer) = endpoint_from_punched(punched, None)?;
 
-    let crypto = tls::client_config_pinned(pin)?;
+    let crypto = match tls_mode {
+        ClientTls::Pin(pin) => tls::client_config_pinned(pin)?,
+        ClientTls::Insecure => tls::client_config_insecure()?,
+    };
     let qcc = QuicClientConfig::try_from(crypto)
         .map_err(|e| Error::Rendezvous(format!("quic client config: {e}")))?;
     endpoint.set_default_client_config(ClientConfig::new(Arc::new(qcc)));

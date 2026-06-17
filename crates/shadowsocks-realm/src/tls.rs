@@ -81,6 +81,21 @@ pub fn client_config_pinned(pin: [u8; 32]) -> Result<rustls::ClientConfig> {
     Ok(cfg)
 }
 
+/// Build a `rustls::ClientConfig` that accepts **any** server certificate
+/// (the carrier's `insecure` mode). The shadowsocks AEAD layer remains the real
+/// end-to-end authentication, so the QUIC carrier TLS here only provides
+/// transport encryption — matching Hysteria's `insecure: true`.
+pub fn client_config_insecure() -> Result<rustls::ClientConfig> {
+    let provider = default_provider();
+    let verifier = Arc::new(InsecureVerifier { provider });
+    let mut cfg = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![ALPN.to_vec()];
+    Ok(cfg)
+}
+
 /// A `ServerCertVerifier` that accepts a single pinned certificate (by SHA-256)
 /// while still cryptographically verifying the handshake signatures, so the peer
 /// must actually possess the pinned certificate's private key.
@@ -88,6 +103,59 @@ pub fn client_config_pinned(pin: [u8; 32]) -> Result<rustls::ClientConfig> {
 struct PinnedVerifier {
     pin: [u8; 32],
     provider: Arc<CryptoProvider>,
+}
+
+/// A `ServerCertVerifier` that accepts any certificate chain (used for the
+/// carrier's `insecure` mode). Handshake signatures are still verified against
+/// the presented certificate's key.
+#[derive(Debug)]
+struct InsecureVerifier {
+    provider: Arc<CryptoProvider>,
+}
+
+impl ServerCertVerifier for InsecureVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
 }
 
 impl ServerCertVerifier for PinnedVerifier {

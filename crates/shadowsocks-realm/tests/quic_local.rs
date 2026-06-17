@@ -61,7 +61,7 @@ async fn quic_stream_and_datagram_over_punched_path() {
     });
 
     // Client: connect, exercise datagram + stream.
-    let carrier = quic::connect_client(punched_client, pin)
+    let carrier = quic::connect_client(punched_client, quic::ClientTls::Pin(pin))
         .await
         .expect("client carrier");
     let conn = carrier.connection();
@@ -77,6 +77,55 @@ async fn quic_stream_and_datagram_over_punched_path() {
     let mut got = Vec::new();
     recv.read_to_end(64).await.map(|v| got = v).expect("read_to_end");
     assert_eq!(got, b"stream-hello");
+
+    carrier.close().await;
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn quic_insecure_mode_accepts_any_cert() {
+    // Same as above but the client uses ClientTls::Insecure (no pin): it must
+    // still establish the carrier against the server's self-signed cert.
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let a_addr = a.local_addr().unwrap();
+    let b_addr = b.local_addr().unwrap();
+    let nonce = [5u8; 16];
+    let obfs = [6u8; 32];
+
+    let ta = tokio::spawn(async move {
+        PunchedSocket::connect(a, &[b_addr], &nonce, &obfs, Duration::from_secs(5))
+            .await
+            .unwrap()
+    });
+    let tb = tokio::spawn(async move {
+        PunchedSocket::connect(b, &[a_addr], &nonce, &obfs, Duration::from_secs(5))
+            .await
+            .unwrap()
+    });
+    let punched_client = ta.await.unwrap();
+    let punched_server = tb.await.unwrap();
+
+    let (cert, key) = tls::generate_self_signed(vec!["realm".into()]).unwrap();
+
+    let server = tokio::spawn(async move {
+        let carrier = quic::accept_server(punched_server, cert, key).await.unwrap();
+        let dg = carrier.connection().read_datagram().await.unwrap();
+        carrier.connection().send_datagram(dg).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        carrier.close().await;
+    });
+
+    // No pin — accept any certificate.
+    let carrier = quic::connect_client(punched_client, quic::ClientTls::Insecure)
+        .await
+        .expect("insecure client carrier");
+    carrier
+        .connection()
+        .send_datagram(bytes::Bytes::from_static(b"insecure-ok"))
+        .unwrap();
+    let echoed = carrier.connection().read_datagram().await.unwrap();
+    assert_eq!(&echoed[..], b"insecure-ok");
 
     carrier.close().await;
     server.await.unwrap();

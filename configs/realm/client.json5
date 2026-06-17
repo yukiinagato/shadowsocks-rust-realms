@@ -21,8 +21,12 @@
   "realm": {
     "rendezvous": "realm://my-secret-token@realm.example.com/my-cabin-1f3a8c2e9b",
     "stun_servers": ["stun.l.google.com:19302"],
-    // Pin the server's self-signed certificate (printed by the server on start).
-    "quic_tls": { "pin_sha256": "BASE16_OR_BASE64_SHA256_OF_SERVER_CERT" },
+    // QUIC carrier TLS. Either pin the server's self-signed certificate
+    // (recommended; the 64-hex pin is printed by the server on startup):
+    "quic_tls": { "pin_sha256": "64_HEX_SHA256_OF_SERVER_CERT" },
+    // ...or skip certificate verification entirely (the shadowsocks AEAD layer
+    // is still the real end-to-end authentication). `pin_sha256` takes priority.
+    //   "quic_tls": { "insecure": true },
     "prefer_tcp": true                       // accept PATH B (direct-TCP) upgrades
   }
 }
