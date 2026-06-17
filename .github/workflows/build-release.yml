@@ -13,6 +13,12 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Needed by softprops/action-gh-release to create/upload the GitHub Release.
+# (Also requires the repo's Settings → Actions → General → Workflow permissions
+# to allow read & write.)
+permissions:
+  contents: write
+
 jobs:
   build-release-cross:
     runs-on: ubuntu-latest

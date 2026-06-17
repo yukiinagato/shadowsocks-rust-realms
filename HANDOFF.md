@@ -24,7 +24,9 @@ proxy protocol unchanged. Both client and server roles.
    ACME/real-cert (DNS-01) support.
 3. **Rendezvous**: compatibility only — the user self-hosts the stock Go
    `hysteria-realm-server`. No rendezvous server code in this repo.
-4. **Feature flag** `realm`: off by default, included in `full-extra`.
+4. **Feature flag** `realm`: off by default, opt-in only via `--features realm`
+   (NOT in `full`/`full-extra` — keeps the heavy dep tree out of the project's
+   default MSRV/clippy/release CI; realm has its own `.github/workflows/realm.yml`).
 5. Delivery style: **plan first, then implement phase by phase**, each phase
    ending compiling + tested. The user wants the final result tested for real
    connectivity in a simulated NAT environment **before** delivery.
@@ -121,8 +123,8 @@ cd /sessions/<session>/mnt/shadowsocks-rust-realms
   stream,json,http2` — note 0.13 renamed `rustls-tls`→`rustls`), `igd-next 0.17`
   (`aio_tokio`), `sha2 0.11`, `tokio`, `tokio-util`, `bytes`, `hex`, `rand 0.10`,
   `futures`, `serde`/`serde_json`.
-- Feature wiring: root `realm = ["shadowsocks-service/realm"]`, added to
-  `full-extra`; `shadowsocks-service` `realm = ["shadowsocks/realm"]`;
+- Feature wiring: root `realm = ["shadowsocks-service/realm"]` (opt-in only, NOT
+  in `full-extra`); `shadowsocks-service` `realm = ["shadowsocks/realm"]`;
   `shadowsocks` `realm = ["dep:shadowsocks-realm"]`. Verified: `--features realm`
   pulls the crate in through the whole chain; **absent from default builds**.
 - Verify commands run green: `cargo build -p shadowsocks-realm` (0 warnings),

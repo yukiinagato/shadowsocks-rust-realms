@@ -104,13 +104,16 @@ full-extra = [
     "aead-cipher-extra",
     "aead-cipher-2022-extra",
     "security-replay-attack-detect",
-    "realm",
 ]
 
 # Realm transport: P2P UDP NAT traversal (rendezvous + STUN + hole punching)
 # with a QUIC carrier and opportunistic UPnP/NAT-PMP direct-TCP upgrade, so an
 # ssserver behind NAT/CGNAT is reachable without a public IP or port forwarding.
-# Off by default; included in `full-extra`.
+#
+# Opt-in only — enable explicitly with `--features realm`. Deliberately NOT in
+# `full`/`full-extra`: it pulls a heavy dependency tree (quinn, rustls, aws-lc,
+# reqwest, igd-next) that the project's default MSRV / clippy / release CI is not
+# configured for. The realm transport has its own CI (.github/workflows/realm.yml).
 realm = ["shadowsocks-service/realm"]
 
 # Enable local server

@@ -7,6 +7,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Needed by softprops/action-gh-release to create/upload the nightly Release.
+permissions:
+  contents: write
+
 jobs:
   build-nightly-cross:
     runs-on: ubuntu-latest

@@ -196,7 +196,7 @@ matches upstream's "generic framework" intent). The carrier/path-manager live in
 
 A server entry gains an optional `realm` object. Its presence switches that
 server to realm transport; absence = ordinary shadowsocks (fully backward
-compatible). New feature flag `realm` (off by default; in `full-extra`).
+compatible). New feature flag `realm` (off by default; opt-in via `--features realm`).
 
 **Server (`ssserver`):**
 ```jsonc
@@ -370,4 +370,7 @@ move a single live flow QUIC→TCP. Only if you want it after Phase 8.
   (DNS-01) support.
 - **Rendezvous:** compatibility only — you self-host the stock Go
   `hysteria-realm-server`; no rendezvous code in this repo.
-- **Feature flag:** `realm` off by default, included in `full-extra`.
+- **Feature flag:** `realm` off by default, **opt-in only** (`--features realm`).
+  Deliberately not in `full`/`full-extra`: it pulls a heavy dep tree (quinn,
+  rustls, aws-lc, reqwest, igd-next) the project's default MSRV/clippy/release CI
+  isn't set up for. It has its own CI (`.github/workflows/realm.yml`).

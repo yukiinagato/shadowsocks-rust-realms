@@ -25,11 +25,10 @@ jobs:
         run: |
           rustup set profile minimal
           rustup toolchain install stable --component clippy
+          rustup default stable
+      # Replaced the deprecated `actions-rs/clippy-check@v1` (runs on Node 20 and
+      # fails with "Resource not accessible by integration" when the workflow
+      # token cannot post to the Checks API, e.g. on forks). A plain `cargo
+      # clippy` run fails the job on lint errors without any special permission.
       - name: Clippy Check
-        uses: actions-rs/clippy-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          args: |
-            --features "full-extra local-flow-stat utility-url-outline"
-            -- -A clippy::absurd_extreme_comparisons
-          name: clippy ${{ matrix.platform }}
+        run: cargo clippy --features "full-extra local-flow-stat utility-url-outline" -- -A clippy::absurd_extreme_comparisons

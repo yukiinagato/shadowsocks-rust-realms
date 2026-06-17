@@ -3585,8 +3585,12 @@ pub fn read_variable_field_value(value: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::OutboundProxy;
+    #[cfg(feature = "aead-cipher")]
     use super::{Config, ConfigType};
 
+    // These parse a server entry with method "aes-256-gcm", which requires an
+    // AEAD cipher to be compiled in; gate them so `--no-default-features` passes.
+    #[cfg(feature = "aead-cipher")]
     #[test]
     fn parses_realm_server_config() {
         let json = r#"{
@@ -3611,6 +3615,7 @@ mod tests {
         assert_eq!(realm.tcp_upgrade_methods, vec!["upnp".to_string(), "natpmp".to_string()]);
     }
 
+    #[cfg(feature = "aead-cipher")]
     #[test]
     fn parses_realm_client_config() {
         let json = r#"{
@@ -3631,6 +3636,7 @@ mod tests {
         assert!(!realm.self_signed);
     }
 
+    #[cfg(feature = "aead-cipher")]
     #[test]
     fn config_without_realm_is_none() {
         let json = r#"{
