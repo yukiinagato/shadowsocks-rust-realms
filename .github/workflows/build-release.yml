@@ -1,8 +1,7 @@
 name: Build Releases
+# Manual-only (upstream's 23-target release matrix). Day-to-day --features realm
+# binaries are produced by realm.yml. Run this from the Actions tab to publish.
 on:
-  push:
-    tags:
-      - v*
   workflow_dispatch:
     inputs:
       tag:

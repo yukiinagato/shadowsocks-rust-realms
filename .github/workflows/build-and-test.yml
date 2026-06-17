@@ -1,6 +1,9 @@
 name: Build & Test
 
-on: [push, pull_request]
+# Manual-only. Automatic CI is realm.yml (builds the --features realm binaries).
+# Run this from the Actions tab when you want the upstream cross-platform checks.
+on:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

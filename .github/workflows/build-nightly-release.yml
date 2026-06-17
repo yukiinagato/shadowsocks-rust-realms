@@ -1,7 +1,6 @@
 name: Build Nightly Releases
+# Manual-only. Automatic CI is realm.yml.
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
 
 env:

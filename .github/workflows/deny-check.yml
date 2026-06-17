@@ -1,5 +1,7 @@
 name: Cargo Deny Check
-on: [push, pull_request]
+# Manual-only. Automatic CI is realm.yml.
+on:
+  workflow_dispatch:
 jobs:
   deny-check:
     runs-on: ubuntu-latest

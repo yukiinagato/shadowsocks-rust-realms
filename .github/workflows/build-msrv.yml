@@ -1,6 +1,8 @@
 name: Build MSRV
 
-on: [push, pull_request]
+# Manual-only. Automatic CI is realm.yml.
+on:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
