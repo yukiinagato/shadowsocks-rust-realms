@@ -125,9 +125,10 @@ pub enum AutoProxyClientStream {
     Proxied(#[pin] ProxyClientStream<MonProxyStream<OutboundTransport>>),
     /// Direct TCP, bypassing the shadowsocks server.
     Bypassed(#[pin] TcpStream),
-    /// Tunnel through the shadowsocks server over the realm QUIC carrier.
+    /// Tunnel through the shadowsocks server over the realm transport (QUIC
+    /// carrier, or direct TCP after a PATH B upgrade).
     #[cfg(feature = "realm")]
-    Realm(#[pin] ProxyClientStream<shadowsocks::realm::RealmStream>),
+    Realm(#[pin] shadowsocks::realm::RealmProxyStream),
 }
 
 impl AutoProxyClientStream {

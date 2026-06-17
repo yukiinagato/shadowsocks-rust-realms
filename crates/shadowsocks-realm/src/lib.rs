@@ -57,6 +57,16 @@ pub struct SessionKeys {
     pub obfs_hex: String,
 }
 
+/// Generate a random 32-byte session-binding token for the direct-TCP path
+/// (PATH B): the server offers it over the control stream and the client
+/// presents it (under ss AEAD) when dialing the mapped TCP endpoint.
+pub fn random_token() -> [u8; 32] {
+    use rand::RngExt;
+    let mut token = [0u8; 32];
+    rand::rng().fill(&mut token[..]);
+    token
+}
+
 /// Generate a fresh [`SessionKeys`] for a connect/punch attempt.
 pub fn random_session() -> SessionKeys {
     use rand::RngExt;

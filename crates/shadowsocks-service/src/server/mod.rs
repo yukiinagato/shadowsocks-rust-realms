@@ -249,6 +249,7 @@ async fn run_realm_server(
     use shadowsocks::context::Context;
     use shadowsocks::config::ServerType;
     use shadowsocks::realm::RealmServer;
+    use shadowsocks::realm::shadowsocks_realm::portmap::PortMapMethod;
     use shadowsocks::realm::shadowsocks_realm::session::ServerParams;
     use shadowsocks::realm::shadowsocks_realm::tls;
 
@@ -261,13 +262,24 @@ async fn run_realm_server(
              falling back to a self-signed carrier certificate"
         );
     }
-    if realm_cfg.tcp_upgrade {
-        log::info!(
-            "realm: tcp_upgrade (PATH B direct-TCP via {:?}) is configured but not yet implemented; \
-             traffic stays on the QUIC carrier (PATH A)",
-            realm_cfg.tcp_upgrade_methods
-        );
-    }
+
+    // PATH B (direct-TCP upgrade) port-mapping methods, parsed once.
+    let tcp_upgrade_methods: Vec<PortMapMethod> = if realm_cfg.tcp_upgrade {
+        realm_cfg
+            .tcp_upgrade_methods
+            .iter()
+            .filter_map(|m| match m.as_str() {
+                "upnp" => Some(PortMapMethod::Upnp),
+                "natpmp" => Some(PortMapMethod::NatPmp),
+                other => {
+                    log::warn!("realm: ignoring unknown tcp_upgrade method {other:?}");
+                    None
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     // Self-signed carrier certificate; print its pin so the client can pin it.
     let (cert, key) = tls::generate_self_signed(vec!["realm".to_owned()])
@@ -292,7 +304,18 @@ async fn run_realm_server(
         match RealmServer::accept(context.clone(), svr_cfg.clone(), params).await {
             Ok(server) => {
                 log::info!("realm carrier established with a client; serving");
-                if let Err(err) = server.serve().await {
+                let serve_result = if realm_cfg.tcp_upgrade {
+                    server
+                        .serve_with_upgrade(
+                            tcp_upgrade_methods.clone(),
+                            realm_cfg.tcp_upgrade_external_port,
+                            7200,
+                        )
+                        .await
+                } else {
+                    server.serve().await
+                };
+                if let Err(err) = serve_result {
                     log::debug!("realm carrier serve ended: {err}");
                 }
                 log::info!("realm carrier closed; re-registering");

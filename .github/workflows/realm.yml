@@ -50,6 +50,9 @@ jobs:
       - name: Test shadowsocks-over-realm end-to-end (library)
         run: cargo test -p shadowsocks --features realm --test realm_e2e --verbose
 
+      - name: Test PATH B direct-TCP upgrade end-to-end (library)
+        run: cargo test -p shadowsocks --features realm --test realm_path_b --verbose
+
       - name: Build debug binaries (--features realm)
         run: cargo build --features realm --bin sslocal --bin ssserver
 
@@ -61,6 +64,15 @@ jobs:
         run: |
           cd testing/nat-sim
           unshare -Urnm --map-root-user env -u http_proxy -u https_proxy -u all_proxy bash punch_demo.sh
+
+      - name: Build NAT-PMP testbed helper
+        run: cargo build -p shadowsocks-realm --example natpmp_map
+
+      - name: Real NAT-PMP gateway + NAT forwarding (best-effort)
+        continue-on-error: true
+        run: |
+          unshare -Urnm --map-root-user env -u http_proxy -u https_proxy -u all_proxy \
+            bash testing/natpmp-sim/run.sh
 
   # ---------------------------------------------------------------------------
   # Release binaries with --features realm, one artifact per native target.

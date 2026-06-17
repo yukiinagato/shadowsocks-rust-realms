@@ -70,17 +70,39 @@ proxy protocol unchanged. Both client and server roles.
   probing, so no spurious TCP checks to the NAT'd address.)
 - **Binary e2e**: `testing/realm-e2e/run_binary_e2e.sh` (also a CI step).
 
-### Remaining (not blocking a working single-client deployment)
+### PATH B (direct-TCP upgrade) — DONE & verified
+
+- Server (`RealmServer::serve_with_upgrade`): maps an external TCP port via
+  `portmap` (UPnP/NAT-PMP), opens a control stream and sends `TcpEndpointOffer
+  {addresses, token}`, and accepts **token-bound native ss-TCP** connections
+  (ss handshake → verify 32-byte token carried as the ss payload prefix → relay).
+  Best-effort: if mapping fails it transparently stays on QUIC.
+- Client (`RealmClient` control loop + `PathManager`): on offer, adopts the TCP
+  endpoint; new connections go over native ss-TCP (`RealmProxyStream::Tcp`,
+  presenting the token), with automatic fallback to QUIC on dial failure.
+- Verified for real:
+  - `crates/shadowsocks/tests/realm_path_b.rs` — full data path over a punched
+    QUIC carrier: offer → adopt → a new connection rides **direct TCP** (asserts
+    `is_direct_tcp()`), token verified, echo round-trips.
+  - `testing/natpmp-sim/run.sh` — a **real NAT-PMP gateway** (daemon answering
+    RFC 6886 + installing **real iptables DNAT**) in netns: a host behind NAT maps
+    a port via our `portmap::natpmp` client and an external client connects
+    through the mapped public port (equivalent to OpenWrt miniupnpd, no VM).
+
+### Remaining
 
 1. **Multi-client** — `session::server_accept` serves one client per registered
    socket (punch then QUIC on the same socket). Many concurrent distinct clients
    need a custom `AsyncUdpSocket` that demuxes punch vs QUIC on a shared socket
    (DESIGN §5). One carrier already multiplexes all of one client's connections.
-2. **ss-UDP over QUIC datagrams**; **PATH B** end-to-end (announce mapped TCP over
-   the control stream + token-bound TCP accept; client switch via `PathManager`).
+2. **ss-UDP over QUIC datagrams** (TCP proxying is complete on both paths).
 3. **Phase 9**: DNS-01 ACME for the carrier, reconnect/heartbeat resilience,
    metrics, ACL/outbound-proxy on the realm server path (currently dials targets
    directly).
+4. **PATH B over a real router end-to-end via the binaries** — the data path and
+   the NAT-PMP mapping are each verified above; wiring `serve_with_upgrade` into a
+   real-NAT binary run needs a UPnP/NAT-PMP-capable gateway (the `natpmp-sim`
+   testbed can be extended to drive `ssserver`/`sslocal` through it).
 
 ### Blocker — RESOLVED
 
