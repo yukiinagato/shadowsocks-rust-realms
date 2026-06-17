@@ -78,12 +78,25 @@ impl Debug for ServerScore {
 }
 
 /// Identifier for a server
-#[derive(Debug)]
 pub struct ServerIdent {
     tcp_score: ServerScore,
     udp_score: ServerScore,
     svr_cfg: ServerInstanceConfig,
     connect_opts: ConnectOpts,
+    /// Lazily-established realm transport carrier (feature `realm`).
+    #[cfg(feature = "realm")]
+    realm_client: Mutex<Option<Arc<shadowsocks::realm::RealmClient>>>,
+}
+
+impl Debug for ServerIdent {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("ServerIdent")
+            .field("tcp_score", &self.tcp_score)
+            .field("udp_score", &self.udp_score)
+            .field("svr_cfg", &self.svr_cfg)
+            .field("connect_opts", &self.connect_opts)
+            .finish()
+    }
 }
 
 impl ServerIdent {
@@ -119,6 +132,8 @@ impl ServerIdent {
             udp_score: ServerScore::new(svr_cfg.config.weight().udp_weight(), max_server_rtt, check_window),
             svr_cfg,
             connect_opts,
+            #[cfg(feature = "realm")]
+            realm_client: Mutex::new(None),
         }
     }
 
@@ -145,4 +160,77 @@ impl ServerIdent {
     pub fn udp_score(&self) -> &ServerScore {
         &self.udp_score
     }
+
+    /// The realm transport config for this server, if it uses realm transport.
+    #[cfg(feature = "realm")]
+    pub fn realm_config(&self) -> Option<&crate::config::RealmConfig> {
+        self.svr_cfg.realm.as_ref()
+    }
+
+    /// Get (establishing on first use) the realm transport carrier for this
+    /// server. On failure the cache is left empty so a later call retries.
+    #[cfg(feature = "realm")]
+    pub async fn realm_client(
+        &self,
+        context: shadowsocks::context::SharedContext,
+    ) -> std::io::Result<Arc<shadowsocks::realm::RealmClient>> {
+        use shadowsocks::realm::shadowsocks_realm::session::ClientParams;
+
+        let mut guard = self.realm_client.lock().await;
+        if let Some(c) = guard.as_ref() {
+            return Ok(c.clone());
+        }
+
+        let realm_cfg = self
+            .svr_cfg
+            .realm
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("server is not configured for realm transport"))?;
+
+        let pin = parse_pin_sha256(realm_cfg.pin_sha256.as_deref())?;
+        let params = ClientParams {
+            rendezvous: realm_cfg.rendezvous.clone(),
+            stun_servers: realm_cfg.stun_servers.clone(),
+            pin,
+            lport: realm_cfg.lport,
+            punch_deadline: Duration::from_secs(10),
+        };
+
+        let client = shadowsocks::realm::RealmClient::connect(
+            context,
+            self.svr_cfg.config.clone(),
+            params,
+            realm_cfg.prefer_tcp,
+        )
+        .await?;
+        let client = Arc::new(client);
+        *guard = Some(client.clone());
+        Ok(client)
+    }
+
+    /// Drop the cached realm carrier (e.g. after a dial failure), so the next
+    /// request re-establishes it.
+    #[cfg(feature = "realm")]
+    pub async fn reset_realm_client(&self) {
+        *self.realm_client.lock().await = None;
+    }
+}
+
+/// Parse a 64-char hex SHA-256 certificate pin into bytes.
+#[cfg(feature = "realm")]
+fn parse_pin_sha256(pin: Option<&str>) -> std::io::Result<[u8; 32]> {
+    let pin = pin
+        .ok_or_else(|| std::io::Error::other("realm client requires quic_tls.pin_sha256"))?
+        .trim();
+    if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(std::io::Error::other(
+            "quic_tls.pin_sha256 must be 64 hex characters (SHA-256 of the server cert)",
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&pin[i * 2..i * 2 + 2], 16)
+            .map_err(|e| std::io::Error::other(format!("invalid pin_sha256: {e}")))?;
+    }
+    Ok(out)
 }

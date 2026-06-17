@@ -1,0 +1,28 @@
+// Example ssserver config using the realm transport (feature `realm`).
+//
+// The presence of the `realm` object switches this server to realm transport:
+// it registers with your self-hosted Go `hysteria-realm-server`, STUN-discovers
+// its address, and accepts a punched QUIC carrier — no public IP or port
+// forwarding needed. Absence of `realm` = ordinary shadowsocks (unchanged).
+//
+// Run:  ssserver -c server.json5 -v   (build with: cargo build --features realm)
+// On start it logs "carrier cert pin (sha256) = <hex>"; copy that into the
+// client's quic_tls.pin_sha256.
+{
+  "server": "0.0.0.0",
+  "server_port": 8388,
+  "password": "your-strong-password",
+  "method": "aes-256-gcm",
+
+  "realm": {
+    // realm://<rendezvous-token>@<rendezvous-host>/<realm-name>
+    "rendezvous": "realm://my-secret-token@realm.example.com/my-cabin-1f3a8c2e9b",
+    "stun_servers": ["stun.l.google.com:19302"],
+    "quic_tls": { "self_signed": true },   // print the SHA-256 pin for the client
+    "tcp_upgrade": {                        // PATH B; best-effort, default on
+      "enable": true,
+      "methods": ["upnp", "natpmp"],
+      "external_port": 0                    // 0 = let the router choose
+    }
+  }
+}

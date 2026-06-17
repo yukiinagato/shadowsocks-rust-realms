@@ -1,0 +1,71 @@
+name: Realm Transport
+
+on:
+  push:
+    paths:
+      - "crates/shadowsocks-realm/**"
+      - "crates/shadowsocks/src/realm.rs"
+      - "crates/shadowsocks/tests/realm_e2e.rs"
+      - "crates/shadowsocks-service/**"
+      - "testing/**"
+      - "Cargo.toml"
+      - ".github/workflows/realm.yml"
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # cmake 4.x dropped compatibility with pre-3.5 CMakeLists (aws-lc-sys); harmless on 3.x.
+  CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+jobs:
+  realm:
+    name: Build, test & end-to-end
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang cmake nasm
+
+      - name: Install Rust (stable + clippy)
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable --component clippy
+          rustup default stable
+
+      # ---- Transport crate: unit + integration tests (spawn Python mocks) ----
+      - name: Test shadowsocks-realm
+        run: cargo test -p shadowsocks-realm --verbose --no-fail-fast
+
+      - name: Clippy shadowsocks-realm (deny warnings)
+        run: cargo clippy -p shadowsocks-realm --all-targets -- -D warnings
+
+      # ---- shadowsocks crate: realm config parsing + ss-over-realm e2e ----
+      - name: Test config (realm parsing)
+        run: cargo test -p shadowsocks-service --features realm --lib config::tests --no-fail-fast
+
+      - name: Test ss-over-realm end-to-end (library)
+        run: cargo test -p shadowsocks --features realm --test realm_e2e --verbose
+
+      # ---- Build the real binaries with the realm feature ----
+      - name: Build sslocal + ssserver (--features realm)
+        run: cargo build --features realm --bin sslocal --bin ssserver --verbose
+
+      # ---- Binary end-to-end: curl through sslocal -> QUIC -> ssserver -> target ----
+      - name: Binary end-to-end through realm transport
+        run: bash testing/realm-e2e/run_binary_e2e.sh target/debug
+
+      # ---- Optional: original double-NAT testbed (best-effort; needs userns) ----
+      - name: Double-NAT testbed (best-effort)
+        continue-on-error: true
+        run: |
+          cd testing/nat-sim
+          unshare -Urnm --map-root-user env -u http_proxy -u https_proxy -u all_proxy bash punch_demo.sh

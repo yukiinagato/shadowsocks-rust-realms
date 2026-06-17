@@ -54,6 +54,10 @@ aead-cipher-2022-extra = ["aead-cipher-2022", "shadowsocks-crypto/v2-extra"]
 # Enable detection against replay attack
 security-replay-attack-detect = ["bloomfilter"]
 
+# Realm transport carrier: QUIC over a punched UDP path + opportunistic
+# direct-TCP upgrade. Pulls in the protocol-agnostic `shadowsocks-realm` crate.
+realm = ["dep:shadowsocks-realm", "dep:quinn"]
+
 [dependencies]
 log = "0.4"
 
@@ -99,6 +103,12 @@ notify = { version = "8.0", optional = true }
 aes = { version = "0.9", optional = true }
 blake3 = "1.5"
 shadowsocks-crypto = { version = "0.7.0", default-features = false }
+
+# Realm transport (feature `realm`): protocol-agnostic NAT-traversal building
+# blocks (rendezvous + STUN + hole punching). Path-relative so it resolves both
+# in-tree and when published.
+shadowsocks-realm = { version = "1.25.0", path = "../shadowsocks-realm", optional = true }
+quinn = { version = "0.11", optional = true }
 
 [target.'cfg(any(windows, target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "tvos"))'.dependencies]
 tokio-tfo = "0.4.3"

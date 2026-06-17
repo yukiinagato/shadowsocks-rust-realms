@@ -395,6 +395,9 @@ struct SSConfig {
     outbound_proxy: Option<SSOutboundProxyConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    realm: Option<SSRealmConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     security: Option<SSSecurityConfig>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -595,6 +598,127 @@ struct SSServerExtConfig {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     outbound_proxy: Option<SSOutboundProxyConfig>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    realm: Option<SSRealmConfig>,
+} // SSServerExtConfig
+
+// ==== Realm transport (P2P NAT traversal) config ====
+//
+// Plain config data; consumed by the `realm`-feature wiring in sslocal/ssserver.
+// Kept feature-independent so configs parse identically regardless of build.
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SSRealmConfig {
+    rendezvous: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stun_servers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prefer_tcp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lport: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quic_tls: Option<SSRealmTlsConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tcp_upgrade: Option<SSRealmTcpUpgrade>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SSRealmTlsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    self_signed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pin_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    insecure: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct SSRealmTcpUpgrade {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_port: Option<u16>,
+}
+
+fn default_tcp_upgrade_methods() -> Vec<String> {
+    vec!["upnp".to_owned(), "natpmp".to_owned()]
+}
+
+impl SSRealmConfig {
+    fn into_realm_config(self) -> RealmConfig {
+        let (self_signed, pin_sha256) = match self.quic_tls {
+            Some(t) => (t.self_signed.unwrap_or(false), t.pin_sha256),
+            None => (true, None),
+        };
+        let (tcp_upgrade, tcp_upgrade_methods, tcp_upgrade_external_port) = match self.tcp_upgrade {
+            Some(u) => (
+                u.enable.unwrap_or(true),
+                if u.methods.is_empty() {
+                    default_tcp_upgrade_methods()
+                } else {
+                    u.methods
+                },
+                u.external_port.unwrap_or(0),
+            ),
+            None => (true, default_tcp_upgrade_methods(), 0),
+        };
+        RealmConfig {
+            rendezvous: self.rendezvous,
+            stun_servers: self.stun_servers,
+            prefer_tcp: self.prefer_tcp.unwrap_or(true),
+            lport: self.lport,
+            self_signed,
+            pin_sha256,
+            tcp_upgrade,
+            tcp_upgrade_methods,
+            tcp_upgrade_external_port,
+        }
+    }
+
+    fn from_realm_config(r: &RealmConfig) -> Self {
+        SSRealmConfig {
+            rendezvous: r.rendezvous.clone(),
+            stun_servers: r.stun_servers.clone(),
+            prefer_tcp: Some(r.prefer_tcp),
+            lport: r.lport,
+            quic_tls: Some(SSRealmTlsConfig {
+                self_signed: Some(r.self_signed),
+                pin_sha256: r.pin_sha256.clone(),
+                insecure: None,
+            }),
+            tcp_upgrade: Some(SSRealmTcpUpgrade {
+                enable: Some(r.tcp_upgrade),
+                methods: r.tcp_upgrade_methods.clone(),
+                external_port: Some(r.tcp_upgrade_external_port),
+            }),
+        }
+    }
+}
+
+/// Parsed realm transport configuration attached to a [`ServerInstanceConfig`].
+#[derive(Debug, Clone)]
+pub struct RealmConfig {
+    /// `realm://token@host/realm` rendezvous locator.
+    pub rendezvous: String,
+    /// Additional STUN servers (`host:port`), merged with any in the URL.
+    pub stun_servers: Vec<String>,
+    /// Client: accept direct-TCP (PATH B) upgrades.
+    pub prefer_tcp: bool,
+    /// Fixed local UDP port (`None` = ephemeral).
+    pub lport: Option<u16>,
+    /// Server: present a self-signed carrier certificate.
+    pub self_signed: bool,
+    /// Client: pinned SHA-256 of the server certificate (hex or base64).
+    pub pin_sha256: Option<String>,
+    /// PATH B (UPnP/NAT-PMP direct-TCP) enabled.
+    pub tcp_upgrade: bool,
+    /// PATH B methods to try, in order (e.g. `["upnp", "natpmp"]`).
+    pub tcp_upgrade_methods: Vec<String>,
+    /// Requested external TCP port (`0` = router-chosen).
+    pub tcp_upgrade_external_port: u16,
 }
 
 #[cfg(feature = "local-online-config")]
@@ -1449,6 +1573,8 @@ pub struct ServerInstanceConfig {
     pub outbound_udp_allow_fragmentation: Option<bool>,
     /// Outbound SOCKS5 proxy chain for this server instance (empty = no proxy)
     pub outbound_proxy: Vec<OutboundProxy>,
+    /// Realm transport (P2P NAT traversal) config; `None` = ordinary shadowsocks
+    pub realm: Option<RealmConfig>,
 }
 
 impl ServerInstanceConfig {
@@ -1465,6 +1591,7 @@ impl ServerInstanceConfig {
             outbound_bind_interface: None,
             outbound_udp_allow_fragmentation: None,
             outbound_proxy: Vec::new(),
+            realm: None,
         }
     }
 }
@@ -2209,7 +2336,11 @@ impl Config {
                     nsvr.set_timeout(timeout);
                 }
 
-                nconfig.server.push(ServerInstanceConfig::with_server_config(nsvr));
+                let mut server_instance = ServerInstanceConfig::with_server_config(nsvr);
+                if let Some(realm) = config.realm.clone() {
+                    server_instance.realm = Some(realm.into_realm_config());
+                }
+                nconfig.server.push(server_instance);
             }
             (None, None, None, Some(_)) if config_type.is_manager() => {
                 // Set the default method for manager
@@ -2424,6 +2555,10 @@ impl Config {
                     server_instance.outbound_proxy = proxy_config
                         .into_proxies()
                         .map_err(|e| Error::new(ErrorKind::Invalid, "invalid outbound_proxy", Some(e)))?;
+                }
+
+                if let Some(realm) = svr.realm {
+                    server_instance.realm = Some(realm.into_realm_config());
                 }
 
                 nconfig.server.push(server_instance);
@@ -3197,6 +3332,8 @@ impl fmt::Display for Config {
 
                 jconf.outbound_proxy = SSOutboundProxyConfig::from_proxies(&inst.outbound_proxy);
 
+                jconf.realm = inst.realm.as_ref().map(SSRealmConfig::from_realm_config);
+
                 if let Some(ref acl) = inst.acl {
                     jconf.acl = Some(acl.file_path().to_str().unwrap().to_owned());
                 }
@@ -3276,6 +3413,7 @@ impl fmt::Display for Config {
                         outbound_bind_interface: inst.outbound_bind_interface.clone(),
                         outbound_udp_allow_fragmentation: inst.outbound_udp_allow_fragmentation,
                         outbound_proxy: SSOutboundProxyConfig::from_proxies(&inst.outbound_proxy),
+                        realm: inst.realm.as_ref().map(SSRealmConfig::from_realm_config),
                     });
                 }
 
@@ -3447,6 +3585,61 @@ pub fn read_variable_field_value(value: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::OutboundProxy;
+    use super::{Config, ConfigType};
+
+    #[test]
+    fn parses_realm_server_config() {
+        let json = r#"{
+            "server": "0.0.0.0",
+            "server_port": 8388,
+            "password": "pwd",
+            "method": "aes-256-gcm",
+            "realm": {
+                "rendezvous": "realm://tok@realm.example.com/cabin",
+                "stun_servers": ["stun.l.google.com:19302"],
+                "quic_tls": { "self_signed": true },
+                "tcp_upgrade": { "enable": true, "methods": ["upnp", "natpmp"] }
+            }
+        }"#;
+        let cfg = Config::load_from_str(json, ConfigType::Server).expect("parse realm server");
+        let inst = &cfg.server[0];
+        let realm = inst.realm.as_ref().expect("realm config present");
+        assert_eq!(realm.rendezvous, "realm://tok@realm.example.com/cabin");
+        assert_eq!(realm.stun_servers, vec!["stun.l.google.com:19302".to_string()]);
+        assert!(realm.self_signed);
+        assert!(realm.tcp_upgrade);
+        assert_eq!(realm.tcp_upgrade_methods, vec!["upnp".to_string(), "natpmp".to_string()]);
+    }
+
+    #[test]
+    fn parses_realm_client_config() {
+        let json = r#"{
+            "server": "0.0.0.0",
+            "server_port": 8388,
+            "password": "pwd",
+            "method": "aes-256-gcm",
+            "realm": {
+                "rendezvous": "realm://tok@realm.example.com/cabin",
+                "quic_tls": { "pin_sha256": "abcd" },
+                "prefer_tcp": true
+            }
+        }"#;
+        let cfg = Config::load_from_str(json, ConfigType::Local).expect("parse realm client");
+        let realm = cfg.server[0].realm.as_ref().expect("realm config present");
+        assert_eq!(realm.pin_sha256.as_deref(), Some("abcd"));
+        assert!(realm.prefer_tcp);
+        assert!(!realm.self_signed);
+    }
+
+    #[test]
+    fn config_without_realm_is_none() {
+        let json = r#"{
+            "server": "0.0.0.0", "server_port": 8388,
+            "password": "pwd", "method": "aes-256-gcm"
+        }"#;
+        let cfg = Config::load_from_str(json, ConfigType::Server).unwrap();
+        assert!(cfg.server[0].realm.is_none());
+    }
 
     #[test]
     fn outbound_proxy_url_without_auth() {

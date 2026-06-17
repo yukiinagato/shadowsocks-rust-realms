@@ -393,6 +393,7 @@ impl Manager {
             outbound_bind_interface: None,
             outbound_udp_allow_fragmentation: None,
             outbound_proxy: Vec::new(),
+            realm: None,
         };
 
         let mut config = Config::new(ConfigType::Server);

@@ -19,5 +19,7 @@ pub mod dns_resolver;
 pub mod manager;
 pub mod net;
 pub mod plugin;
+#[cfg(feature = "realm")]
+pub mod realm;
 pub mod relay;
 mod security;

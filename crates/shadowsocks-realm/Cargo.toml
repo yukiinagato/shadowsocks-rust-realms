@@ -1,0 +1,58 @@
+[package]
+name = "shadowsocks-realm"
+version = "1.25.0"
+authors = ["Shadowsocks Contributors"]
+description = "Hysteria-Realms-compatible P2P UDP NAT traversal (rendezvous + STUN + hole punching) with a QUIC carrier and opportunistic UPnP/NAT-PMP TCP upgrade, for shadowsocks."
+repository = "https://github.com/shadowsocks/shadowsocks-rust"
+license = "MIT"
+edition = "2024"
+rust-version = "1.91"
+
+# This crate is protocol-agnostic and has **zero** shadowsocks dependencies.
+# It is pulled into the workspace only when the top-level `realm` feature is on,
+# so its dependencies are unconditional here (gating happens one level up).
+
+[dependencies]
+log = "0.4"
+thiserror = "2.0"
+bytes = "1.7"
+hex = "0.4"
+rand = "0.10"
+sha2 = "0.11"
+
+futures = "0.3"
+tokio = { version = "1.9.0", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Rendezvous HTTP + SSE client. rustls-tls to avoid OpenSSL; stream for SSE.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "rustls-native-certs",
+    "webpki-roots",
+    "stream",
+    "json",
+    "http2",
+] }
+
+# QUIC carrier (PATH A). quinn's defaults use rustls + aws-lc-rs, matching
+# shadowsocks-crypto's aws-lc backend.
+quinn = "0.11"
+rustls = "0.23"
+# Self-signed certificate generation for the QUIC carrier (default TLS mode).
+rcgen = "0.14"
+
+# UPnP-IGD port mapping for the opportunistic direct-TCP path (PATH B).
+igd-next = { version = "0.17", features = ["aio_tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1.9.0", features = ["full"] }

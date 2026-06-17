@@ -125,6 +125,9 @@ pub enum AutoProxyClientStream {
     Proxied(#[pin] ProxyClientStream<MonProxyStream<OutboundTransport>>),
     /// Direct TCP, bypassing the shadowsocks server.
     Bypassed(#[pin] TcpStream),
+    /// Tunnel through the shadowsocks server over the realm QUIC carrier.
+    #[cfg(feature = "realm")]
+    Realm(#[pin] ProxyClientStream<shadowsocks::realm::RealmStream>),
 }
 
 impl AutoProxyClientStream {
@@ -238,6 +241,29 @@ impl AutoProxyClientStream {
     {
         let flow_stat = context.flow_stat();
         let target_addr: Address = addr.into();
+
+        // Realm transport: dial the target over the QUIC carrier (PATH A),
+        // establishing the carrier lazily on first use.
+        #[cfg(feature = "realm")]
+        if server.realm_config().is_some() {
+            let client = match server.realm_client(context.context()).await {
+                Ok(c) => c,
+                Err(err) => {
+                    server.tcp_score().report_failure().await;
+                    return Err(err);
+                }
+            };
+            return match client.connect_target(target_addr.clone()).await {
+                Ok(s) => Ok(Self::Realm(s)),
+                Err(err) => {
+                    // Drop the (possibly dead) carrier so the next request reconnects.
+                    server.reset_realm_client().await;
+                    server.tcp_score().report_failure().await;
+                    Err(err)
+                }
+            };
+        }
+
         let ss_addr: Address = server.server_config().tcp_external_addr().into();
 
         let dial_result = match context.outbound_client() {
@@ -273,6 +299,10 @@ impl AutoProxyClientStream {
         match *self {
             Self::Proxied(ref s) => s.get_ref().get_ref().local_addr(),
             Self::Bypassed(ref s) => s.local_addr(),
+            // The realm carrier rides a punched UDP socket; no per-connection
+            // TCP local address. Report the unspecified address.
+            #[cfg(feature = "realm")]
+            Self::Realm(..) => Ok(SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0)),
         }
     }
 
@@ -280,12 +310,19 @@ impl AutoProxyClientStream {
         match *self {
             Self::Proxied(ref s) => s.get_ref().get_ref().set_nodelay(nodelay),
             Self::Bypassed(ref s) => s.set_nodelay(nodelay),
+            // No-op: QUIC manages its own framing/transport options.
+            #[cfg(feature = "realm")]
+            Self::Realm(..) => Ok(()),
         }
     }
 }
 
 impl AutoProxyIo for AutoProxyClientStream {
     fn is_proxied(&self) -> bool {
+        #[cfg(feature = "realm")]
+        if matches!(*self, Self::Realm(..)) {
+            return true;
+        }
         matches!(*self, Self::Proxied(..))
     }
 }
@@ -295,6 +332,8 @@ impl AsyncRead for AutoProxyClientStream {
         match self.project() {
             AutoProxyClientStreamProj::Proxied(s) => s.poll_read(cx, buf),
             AutoProxyClientStreamProj::Bypassed(s) => s.poll_read(cx, buf),
+            #[cfg(feature = "realm")]
+            AutoProxyClientStreamProj::Realm(s) => s.poll_read(cx, buf),
         }
     }
 }
@@ -304,6 +343,8 @@ impl AsyncWrite for AutoProxyClientStream {
         match self.project() {
             AutoProxyClientStreamProj::Proxied(s) => s.poll_write(cx, buf),
             AutoProxyClientStreamProj::Bypassed(s) => s.poll_write(cx, buf),
+            #[cfg(feature = "realm")]
+            AutoProxyClientStreamProj::Realm(s) => s.poll_write(cx, buf),
         }
     }
 
@@ -311,6 +352,8 @@ impl AsyncWrite for AutoProxyClientStream {
         match self.project() {
             AutoProxyClientStreamProj::Proxied(s) => s.poll_flush(cx),
             AutoProxyClientStreamProj::Bypassed(s) => s.poll_flush(cx),
+            #[cfg(feature = "realm")]
+            AutoProxyClientStreamProj::Realm(s) => s.poll_flush(cx),
         }
     }
 
@@ -318,6 +361,8 @@ impl AsyncWrite for AutoProxyClientStream {
         match self.project() {
             AutoProxyClientStreamProj::Proxied(s) => s.poll_shutdown(cx),
             AutoProxyClientStreamProj::Bypassed(s) => s.poll_shutdown(cx),
+            #[cfg(feature = "realm")]
+            AutoProxyClientStreamProj::Realm(s) => s.poll_shutdown(cx),
         }
     }
 
@@ -329,6 +374,8 @@ impl AsyncWrite for AutoProxyClientStream {
         match self.project() {
             AutoProxyClientStreamProj::Proxied(s) => s.poll_write_vectored(cx, bufs),
             AutoProxyClientStreamProj::Bypassed(s) => s.poll_write_vectored(cx, bufs),
+            #[cfg(feature = "realm")]
+            AutoProxyClientStreamProj::Realm(s) => s.poll_write_vectored(cx, bufs),
         }
     }
 }

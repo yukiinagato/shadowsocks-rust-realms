@@ -60,6 +60,8 @@ pub async fn run(config: Config) -> io::Result<()> {
     }
 
     let mut servers = Vec::new();
+    #[cfg(feature = "realm")]
+    let mut realm_handles: Vec<ServerHandle> = Vec::new();
 
     let mut connect_opts = ConnectOpts {
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -109,6 +111,16 @@ pub async fn run(config: Config) -> io::Result<()> {
     let acl = config.acl.map(Arc::new);
 
     for inst in config.server {
+        // Realm transport: this server is reached via P2P NAT traversal, not a
+        // local TCP listener. Spawn a dedicated realm accept loop and skip the
+        // ordinary server build for this entry.
+        #[cfg(feature = "realm")]
+        if let Some(realm_cfg) = inst.realm {
+            let svr_cfg = inst.config;
+            realm_handles.push(ServerHandle(tokio::spawn(run_realm_server(svr_cfg, realm_cfg))));
+            continue;
+        }
+
         let svr_cfg = inst.config;
         let svr_enable_udp = svr_cfg.mode().enable_udp();
         let mut server_builder = ServerBuilder::new(svr_cfg);
@@ -198,6 +210,18 @@ pub async fn run(config: Config) -> io::Result<()> {
         servers.push(server);
     }
 
+    // When realm servers are present, run everything (normal + realm) together.
+    #[cfg(feature = "realm")]
+    if !realm_handles.is_empty() {
+        let mut vfut = Vec::with_capacity(servers.len() + realm_handles.len());
+        for server in servers {
+            vfut.push(ServerHandle(tokio::spawn(async move { server.run().await })));
+        }
+        vfut.extend(realm_handles);
+        let (res, ..) = future::select_all(vfut).await;
+        return res;
+    }
+
     if servers.len() == 1 {
         let server = servers.pop().unwrap();
         return server.run().await;
@@ -211,4 +235,57 @@ pub async fn run(config: Config) -> io::Result<()> {
 
     let (res, ..) = future::select_all(vfut).await;
     res
+}
+
+/// Realm transport server accept loop: register with the rendezvous, accept a
+/// punched QUIC carrier, serve its proxied streams, then re-register for the next
+/// client. One carrier multiplexes all of a client's connections; serving
+/// multiple distinct clients concurrently requires shared-socket demux (roadmap).
+#[cfg(feature = "realm")]
+async fn run_realm_server(
+    svr_cfg: shadowsocks::config::ServerConfig,
+    realm_cfg: crate::config::RealmConfig,
+) -> io::Result<()> {
+    use shadowsocks::context::Context;
+    use shadowsocks::config::ServerType;
+    use shadowsocks::realm::RealmServer;
+    use shadowsocks::realm::shadowsocks_realm::session::ServerParams;
+    use shadowsocks::realm::shadowsocks_realm::tls;
+
+    let context = Context::new_shared(ServerType::Server);
+
+    // Self-signed carrier certificate; print its pin so the client can pin it.
+    let (cert, key) = tls::generate_self_signed(vec!["realm".to_owned()])
+        .map_err(|e| io::Error::other(format!("realm self-signed cert: {e}")))?;
+    let pin_hex: String = tls::cert_sha256(&cert).iter().map(|b| format!("{b:02x}")).collect();
+    log::info!(
+        "realm server registered transport for {}; carrier cert pin (sha256) = {}",
+        svr_cfg.addr(),
+        pin_hex
+    );
+
+    loop {
+        let params = ServerParams {
+            rendezvous: realm_cfg.rendezvous.clone(),
+            stun_servers: realm_cfg.stun_servers.clone(),
+            cert: cert.clone(),
+            key: key.clone_key(),
+            lport: realm_cfg.lport,
+            punch_deadline: Duration::from_secs(10),
+        };
+
+        match RealmServer::accept(context.clone(), svr_cfg.clone(), params).await {
+            Ok(server) => {
+                log::info!("realm carrier established with a client; serving");
+                if let Err(err) = server.serve().await {
+                    log::debug!("realm carrier serve ended: {err}");
+                }
+                log::info!("realm carrier closed; re-registering");
+            }
+            Err(err) => {
+                log::warn!("realm accept failed: {err}; retrying in 2s");
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    }
 }

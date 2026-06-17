@@ -45,7 +45,11 @@ path = "bin/sswinservice.rs"
 required-features = ["winservice"]
 
 [workspace]
-members = ["crates/shadowsocks", "crates/shadowsocks-service"]
+members = [
+    "crates/shadowsocks",
+    "crates/shadowsocks-service",
+    "crates/shadowsocks-realm",
+]
 
 [profile.release]
 lto = "fat"
@@ -100,7 +104,14 @@ full-extra = [
     "aead-cipher-extra",
     "aead-cipher-2022-extra",
     "security-replay-attack-detect",
+    "realm",
 ]
+
+# Realm transport: P2P UDP NAT traversal (rendezvous + STUN + hole punching)
+# with a QUIC carrier and opportunistic UPnP/NAT-PMP direct-TCP upgrade, so an
+# ssserver behind NAT/CGNAT is reachable without a public IP or port forwarding.
+# Off by default; included in `full-extra`.
+realm = ["shadowsocks-service/realm"]
 
 # Enable local server
 local = ["shadowsocks-service/local"]

@@ -1,0 +1,28 @@
+// Example sslocal config using the realm transport (feature `realm`).
+//
+// The client reaches the NAT-bound server through the same rendezvous, punches a
+// hole, and runs shadowsocks over the QUIC carrier (upgrading to direct TCP if
+// the server offers a mapped port and `prefer_tcp` is set).
+//
+// Run:  sslocal -c client.json5 -v   (build with: cargo build --features realm)
+// Set quic_tls.pin_sha256 to the hex pin the server prints on startup.
+{
+  "locals": [
+    { "local_address": "127.0.0.1", "local_port": 1080, "protocol": "socks" }
+  ],
+
+  // Realm reaches the server via the rendezvous, not this address — but config
+  // validation still requires a valid, non-unspecified placeholder here.
+  "server": "192.0.2.1",
+  "server_port": 8388,
+  "password": "your-strong-password",
+  "method": "aes-256-gcm",
+
+  "realm": {
+    "rendezvous": "realm://my-secret-token@realm.example.com/my-cabin-1f3a8c2e9b",
+    "stun_servers": ["stun.l.google.com:19302"],
+    // Pin the server's self-signed certificate (printed by the server on start).
+    "quic_tls": { "pin_sha256": "BASE16_OR_BASE64_SHA256_OF_SERVER_CERT" },
+    "prefer_tcp": true                       // accept PATH B (direct-TCP) upgrades
+  }
+}

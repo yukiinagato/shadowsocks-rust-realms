@@ -120,6 +120,10 @@ aead-cipher-2022-extra = [
 # Enable detection against replay attack
 security-replay-attack-detect = ["shadowsocks/security-replay-attack-detect"]
 
+# Realm transport: P2P UDP NAT traversal for sslocal/ssserver (see the
+# `shadowsocks` crate's `realm` feature for the carrier).
+realm = ["shadowsocks/realm"]
+
 [dependencies]
 log = "0.4"
 
