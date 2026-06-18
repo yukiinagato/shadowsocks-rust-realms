@@ -53,6 +53,12 @@ jobs:
       - name: Test PATH B direct-TCP upgrade end-to-end (library)
         run: cargo test -p shadowsocks --features realm --test realm_path_b --verbose
 
+      - name: Test multi-client concurrency end-to-end (library)
+        run: cargo test -p shadowsocks --features realm --test realm_multiclient --verbose
+
+      - name: Test ss-UDP over QUIC datagrams end-to-end (library)
+        run: cargo test -p shadowsocks --features realm --test realm_udp --verbose
+
       - name: Build debug binaries (--features realm)
         run: cargo build --features realm --bin sslocal --bin ssserver
 
@@ -73,6 +79,15 @@ jobs:
         run: |
           unshare -Urnm --map-root-user env -u http_proxy -u https_proxy -u all_proxy \
             bash testing/natpmp-sim/run.sh
+
+      - name: Build packet-loss probe
+        run: cargo build -p shadowsocks-realm --example realm_probe
+
+      - name: Availability under packet loss + concurrency (best-effort)
+        continue-on-error: true
+        run: |
+          unshare -Urnm --map-root-user env -u http_proxy -u https_proxy -u all_proxy \
+            bash testing/loss-sim/run.sh
 
   # ---------------------------------------------------------------------------
   # Release binaries with --features realm, one artifact per native target.

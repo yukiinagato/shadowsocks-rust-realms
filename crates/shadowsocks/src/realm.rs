@@ -10,6 +10,7 @@
 //! of the shadowsocks crate (ss protocol + relay). The higher-level sslocal /
 //! ssserver wiring lives in `shadowsocks-service`.
 
+use std::collections::HashMap;
 use std::io::{self, IoSlice};
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -32,6 +33,7 @@ use crate::context::SharedContext;
 use crate::relay::Address;
 use crate::relay::tcprelay::utils::copy_encrypted_bidirectional;
 use crate::relay::tcprelay::{ProxyClientStream, ProxyServerStream};
+use crate::relay::udprelay::{DatagramReceive, DatagramSend, DatagramSocket, ProxySocket, UdpSocketType};
 
 // Re-export the transport crate so downstream code has one import path.
 pub use shadowsocks_realm;
@@ -283,9 +285,19 @@ impl RealmServer {
         Ok(Self { context, svr_cfg, carrier })
     }
 
-    /// Serve proxied streams over the QUIC carrier (PATH A only) until it closes.
+    /// Wrap an already-established carrier (e.g. from [`RealmListener`], which
+    /// accepts many clients concurrently).
+    pub fn from_carrier(context: SharedContext, svr_cfg: ServerConfig, carrier: QuicCarrier) -> Self {
+        Self { context, svr_cfg, carrier }
+    }
+
+    /// Serve proxied TCP streams **and** ss-UDP datagrams over the QUIC carrier
+    /// (PATH A) until it closes.
     pub async fn serve(&self) -> io::Result<()> {
-        self.serve_quic_only().await
+        tokio::select! {
+            r = self.serve_quic_only() => r,
+            r = serve_udp_relay(self.context.clone(), self.svr_cfg.clone(), self.carrier.connection().clone()) => r,
+        }
     }
 
     /// QUIC accept loop: handshake each bidi stream, dial its target, relay.
@@ -408,8 +420,12 @@ impl RealmServer {
             }
         });
 
-        // Run the QUIC carrier until it closes, then stop the TCP loop.
-        let res = self.serve_quic_only().await;
+        // Run the QUIC carrier (TCP streams + UDP datagrams) until it closes,
+        // then stop the direct-TCP accept loop.
+        let res = tokio::select! {
+            r = self.serve_quic_only() => r,
+            r = serve_udp_relay(self.context.clone(), self.svr_cfg.clone(), self.carrier.connection().clone()) => r,
+        };
         tcp_task.abort();
         res
     }
@@ -417,6 +433,83 @@ impl RealmServer {
     /// The established carrier.
     pub fn carrier(&self) -> &QuicCarrier {
         &self.carrier
+    }
+}
+
+/// Direct-TCP (PATH B) options for [`RealmListener::run`].
+#[derive(Debug, Clone)]
+pub struct TcpUpgradeOpts {
+    /// Port-mapping backends to try, in order.
+    pub methods: Vec<shadowsocks_realm::portmap::PortMapMethod>,
+    /// Requested external TCP port (`0` = router-chosen).
+    pub external_port: u16,
+    /// Mapping lease in seconds.
+    pub lease_secs: u32,
+}
+
+/// Multi-client realm server: registers once and accepts **many** clients
+/// concurrently, each on its own carrier (and its own per-client socket), so a
+/// single `ssserver` realm entry serves many `sslocal`s at the same time.
+pub struct RealmListener {
+    context: SharedContext,
+    svr_cfg: ServerConfig,
+    registration: Arc<shadowsocks_realm::session::RealmServerRegistration>,
+}
+
+impl RealmListener {
+    /// Register with the rendezvous (one registration, kept alive by heartbeat).
+    pub async fn bind(
+        context: SharedContext,
+        svr_cfg: ServerConfig,
+        params: ServerParams,
+    ) -> io::Result<Self> {
+        let registration = shadowsocks_realm::session::RealmServerRegistration::register(params)
+            .await
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            context,
+            svr_cfg,
+            registration: Arc::new(registration),
+        })
+    }
+
+    /// Accept clients forever. Each punch event is handled in its own task
+    /// (punch + QUIC handshake + serve), so many clients connect concurrently
+    /// without blocking each other. `tcp_upgrade` enables PATH B per client.
+    pub async fn run(&self, tcp_upgrade: Option<TcpUpgradeOpts>) -> io::Result<()> {
+        loop {
+            let punch = match self.registration.next_punch().await {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("realm: rendezvous event error: {e}; retrying shortly");
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+            };
+
+            let reg = self.registration.clone();
+            let context = self.context.clone();
+            let svr_cfg = self.svr_cfg.clone();
+            let upgrade = tcp_upgrade.clone();
+            tokio::spawn(async move {
+                let carrier = match reg.handle_punch(punch).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::debug!("realm: client handshake failed: {e}");
+                        return;
+                    }
+                };
+                log::info!("realm: new client carrier from {}", carrier.remote_address());
+                let server = RealmServer::from_carrier(context, svr_cfg, carrier);
+                let res = match upgrade {
+                    Some(u) => server.serve_with_upgrade(u.methods, u.external_port, u.lease_secs).await,
+                    None => server.serve().await,
+                };
+                if let Err(e) = res {
+                    log::debug!("realm: client serve ended: {e}");
+                }
+            });
+        }
     }
 }
 
@@ -443,4 +536,182 @@ async fn serve_tcp_conn(
     let mut remote = TcpStream::connect(target.to_string()).await?;
     copy_encrypted_bidirectional(method, &mut ss, &mut remote).await?;
     Ok(())
+}
+
+// ===================== ss-UDP over QUIC datagrams =====================
+
+/// A datagram transport backed by QUIC unreliable datagrams over the carrier.
+/// Implements the shadowsocks `DatagramSend`/`DatagramReceive` traits so it can
+/// drop into [`ProxySocket`] and reuse the existing ss-UDP AEAD codec unchanged.
+#[derive(Debug)]
+pub struct QuicDatagramSocket {
+    conn: quinn::Connection,
+    rx: std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<bytes::Bytes>>,
+}
+
+impl QuicDatagramSocket {
+    /// Wrap a carrier connection; a background task pumps inbound datagrams.
+    pub fn new(conn: quinn::Connection) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let c = conn.clone();
+        tokio::spawn(async move {
+            while let Ok(b) = c.read_datagram().await {
+                if tx.send(b).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            conn,
+            rx: std::sync::Mutex::new(rx),
+        }
+    }
+}
+
+impl DatagramSocket for QuicDatagramSocket {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), 0))
+    }
+}
+
+impl DatagramSend for QuicDatagramSocket {
+    fn poll_send(&self, _cx: &mut TaskContext<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+        match self.conn.send_datagram(bytes::Bytes::copy_from_slice(buf)) {
+            Ok(()) => Poll::Ready(Ok(buf.len())),
+            Err(e) => Poll::Ready(Err(io::Error::other(e))),
+        }
+    }
+    fn poll_send_to(
+        &self,
+        cx: &mut TaskContext<'_>,
+        buf: &[u8],
+        _target: SocketAddr,
+    ) -> Poll<io::Result<usize>> {
+        self.poll_send(cx, buf)
+    }
+    fn poll_send_ready(&self, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl DatagramReceive for QuicDatagramSocket {
+    fn poll_recv(&self, cx: &mut TaskContext<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+        let mut rx = self.rx.lock().unwrap();
+        match rx.poll_recv(cx) {
+            Poll::Ready(Some(b)) => {
+                let n = b.len().min(buf.remaining());
+                buf.put_slice(&b[..n]);
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(None) => {
+                Poll::Ready(Err(io::Error::new(io::ErrorKind::BrokenPipe, "carrier closed")))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+    fn poll_recv_from(
+        &self,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<SocketAddr>> {
+        match self.poll_recv(cx, buf) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(self.conn.remote_address())),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+    fn poll_recv_ready(&self, _cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// Client-side ss-UDP socket over the carrier's QUIC datagrams. Use it exactly
+/// like a normal ss `ProxySocket` (send/recv with target [`Address`]).
+pub type RealmUdpClient = ProxySocket<QuicDatagramSocket>;
+
+impl RealmClient {
+    /// Build a ss-UDP `ProxySocket` over the carrier (for sslocal UDP associate).
+    pub fn proxy_udp(&self) -> RealmUdpClient {
+        let sock = QuicDatagramSocket::new(self.carrier.connection().clone());
+        ProxySocket::from_socket(UdpSocketType::Client, self.context.clone(), &self.svr_cfg, sock)
+    }
+}
+
+async fn resolve_target(addr: &Address) -> io::Result<SocketAddr> {
+    match addr {
+        Address::SocketAddress(sa) => Ok(*sa),
+        Address::DomainNameAddress(host, port) => tokio::net::lookup_host((host.as_str(), *port))
+            .await?
+            .next()
+            .ok_or_else(|| io::Error::other(format!("cannot resolve {host}:{port}"))),
+    }
+}
+
+/// Server-side ss-UDP relay over the carrier's QUIC datagrams: decrypt each
+/// datagram into (target, payload), forward over a per-target UDP socket, and
+/// return replies as datagrams. One association map per carrier.
+async fn serve_udp_relay(
+    context: SharedContext,
+    svr_cfg: ServerConfig,
+    conn: quinn::Connection,
+) -> io::Result<()> {
+    let proxy = Arc::new(ProxySocket::<QuicDatagramSocket>::from_socket(
+        UdpSocketType::Server,
+        context,
+        &svr_cfg,
+        QuicDatagramSocket::new(conn),
+    ));
+    let assoc: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::net::UdpSocket>>>> =
+        Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let (n, target, _pkt) = match proxy.recv(&mut buf).await {
+            Ok(v) => v,
+            Err(_) => return Ok(()), // carrier closed
+        };
+        let payload = buf[..n].to_vec();
+        let key = target.to_string();
+
+        let out = {
+            let mut map = assoc.lock().await;
+            if let Some(s) = map.get(&key) {
+                s.clone()
+            } else {
+                let sa = match resolve_target(&target).await {
+                    Ok(sa) => sa,
+                    Err(e) => {
+                        log::debug!("realm udp: resolve {key} failed: {e}");
+                        continue;
+                    }
+                };
+                let s = tokio::net::UdpSocket::bind("0.0.0.0:0").await?;
+                if s.connect(sa).await.is_err() {
+                    continue;
+                }
+                let s = Arc::new(s);
+                map.insert(key.clone(), s.clone());
+
+                // reply pump: target -> client (re-encrypted as a datagram)
+                let proxy2 = proxy.clone();
+                let s2 = s.clone();
+                let reply_addr = target.clone();
+                tokio::spawn(async move {
+                    let mut rbuf = vec![0u8; 64 * 1024];
+                    loop {
+                        match s2.recv(&mut rbuf).await {
+                            Ok(rn) => {
+                                if proxy2.send(&reply_addr, &rbuf[..rn]).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                });
+                s
+            }
+        };
+        let _ = out.send(&payload).await;
+    }
 }

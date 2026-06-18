@@ -134,6 +134,103 @@ pub async fn server_accept(params: ServerParams) -> Result<QuicCarrier> {
     quic::accept_server(punched, params.cert, params.key).await
 }
 
+/// A long-lived server registration that accepts **many** clients concurrently.
+///
+/// Registers once, keeps the registration alive with a heartbeat, then hands out
+/// one [`QuicCarrier`] per [`accept`](RealmServerRegistration::accept). Each
+/// client gets its **own fresh UDP socket** (fresh STUN reflexive address posted
+/// via `connects`), so there is no shared-socket demultiplexing — exactly the
+/// per-connection model the Realms rendezvous protocol is built for.
+pub struct RealmServerRegistration {
+    rc: RendezvousClient,
+    session_id: String,
+    stun_servers: Vec<String>,
+    cert: CertificateDer<'static>,
+    key: PrivateKeyDer<'static>,
+    punch_deadline: Duration,
+    heartbeat: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RealmServerRegistration {
+    /// Register with the rendezvous and start the heartbeat keepalive.
+    pub async fn register(params: ServerParams) -> Result<Self> {
+        let url = RealmUrl::parse(&params.rendezvous)?;
+        let mut stun_servers = url.stun_servers.clone();
+        stun_servers.extend(params.stun_servers.iter().cloned());
+        let bind_port = params.lport.or(url.lport).unwrap_or(0);
+
+        // A socket only to learn an initial reflexive address for registration;
+        // each accepted client later uses its own fresh socket.
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, bind_port)).await?;
+        let addresses = discover_addresses(&socket, &stun_servers).await;
+        drop(socket);
+
+        let rc = RendezvousClient::new(url)?;
+        let reg = rc.register(addresses).await?;
+        let session_id = reg.session_id;
+        let ttl = reg.ttl.max(10);
+
+        let hb_rc = rc.clone();
+        let hb_sid = session_id.clone();
+        let heartbeat = tokio::spawn(async move {
+            let interval = Duration::from_secs((ttl / 2).max(5));
+            loop {
+                tokio::time::sleep(interval).await;
+                let _ = hb_rc.heartbeat(&hb_sid, None).await;
+            }
+        });
+
+        Ok(Self {
+            rc,
+            session_id,
+            stun_servers,
+            cert: params.cert,
+            key: params.key,
+            punch_deadline: params.punch_deadline,
+            heartbeat: Some(heartbeat),
+        })
+    }
+
+    /// Wait for the next client's punch request (one rendezvous event).
+    pub async fn next_punch(&self) -> Result<ConnectBody> {
+        loop {
+            match self.rc.poll_event(&self.session_id).await? {
+                RendezvousEvent::Punch(cb) => return Ok(cb),
+                RendezvousEvent::HeartbeatAck => continue,
+            }
+        }
+    }
+
+    /// Complete one client's punch + QUIC handshake on a fresh socket. Safe to
+    /// run concurrently for many clients (each uses its own socket).
+    pub async fn handle_punch(&self, punch: ConnectBody) -> Result<QuicCarrier> {
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        let fresh = discover_addresses(&socket, &self.stun_servers).await;
+        self.rc.post_connects(&self.session_id, &punch.nonce, fresh).await?;
+
+        let nonce = decode_n::<16>(&punch.nonce, "nonce")?;
+        let obfs = decode_n::<32>(&punch.obfs, "obfs")?;
+        let peer_addrs = parse_addrs(&punch.addresses)?;
+        let punched =
+            PunchedSocket::connect(socket, &peer_addrs, &nonce, &obfs, self.punch_deadline).await?;
+        quic::accept_server(punched, self.cert.clone(), self.key.clone_key()).await
+    }
+
+    /// Convenience: wait for one client and complete its handshake.
+    pub async fn accept(&self) -> Result<QuicCarrier> {
+        let punch = self.next_punch().await?;
+        self.handle_punch(punch).await
+    }
+}
+
+impl Drop for RealmServerRegistration {
+    fn drop(&mut self) {
+        if let Some(h) = self.heartbeat.take() {
+            h.abort();
+        }
+    }
+}
+
 fn parse_addrs(v: &[String]) -> Result<Vec<SocketAddr>> {
     let out: Vec<SocketAddr> = v.iter().filter_map(|s| s.parse().ok()).collect();
     if out.is_empty() {

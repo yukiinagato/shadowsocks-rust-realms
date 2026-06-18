@@ -44,9 +44,20 @@ use crate::{
 /// fully SOCKS5 (otherwise the chain is bypassed for UDP).
 async fn create_proxied_socket(
     context: &ServiceContext,
-    svr_cfg: &ServerConfig,
+    server: &crate::local::loadbalancing::ServerIdent,
     connect_opts: &ConnectOpts,
 ) -> io::Result<ProxiedSocket> {
+    let svr_cfg = server.server_config();
+
+    // Realm transport: carry ss-UDP over the QUIC carrier's datagrams (PATH A).
+    #[cfg(feature = "realm")]
+    if server.realm_config().is_some() {
+        let client = server.realm_client(context.context()).await?;
+        let proxy_socket = client.proxy_udp();
+        let mon = MonProxySocket::from_socket(proxy_socket, context.flow_stat());
+        return Ok(ProxiedSocket::Realm(mon));
+    }
+
     let use_chain = context
         .outbound_client()
         .map(|c| c.supports_udp())
@@ -94,6 +105,9 @@ impl TcpDialer for LocalTcpDialer {
 enum ProxiedSocket {
     Direct(MonProxySocket<ShadowUdpSocket>),
     Chained(MonProxySocket<OutboundProxyDatagram>),
+    /// ss-UDP carried over the realm QUIC carrier's datagrams (PATH A).
+    #[cfg(feature = "realm")]
+    Realm(MonProxySocket<shadowsocks::realm::QuicDatagramSocket>),
 }
 
 impl ProxiedSocket {
@@ -106,6 +120,8 @@ impl ProxiedSocket {
         match self {
             Self::Direct(s) => s.send_with_ctrl(addr, control, data).await,
             Self::Chained(s) => s.send_with_ctrl(addr, control, data).await,
+            #[cfg(feature = "realm")]
+            Self::Realm(s) => s.send_with_ctrl(addr, control, data).await,
         }
     }
 
@@ -116,6 +132,8 @@ impl ProxiedSocket {
         match self {
             Self::Direct(s) => s.recv_with_ctrl(buf).await,
             Self::Chained(s) => s.recv_with_ctrl(buf).await,
+            #[cfg(feature = "realm")]
+            Self::Realm(s) => s.recv_with_ctrl(buf).await,
         }
     }
 }
@@ -653,11 +671,10 @@ where
             None => {
                 // Create a new connection to proxy server
                 let server = self.balancer.best_udp_server();
-                let svr_cfg = server.server_config();
 
                 let proxied = create_proxied_socket(
                     self.context.as_ref(),
-                    svr_cfg,
+                    server.as_ref(),
                     server.connect_opts_ref(),
                 )
                 .await?;

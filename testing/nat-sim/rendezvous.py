@@ -8,6 +8,7 @@ exercise a Rust rendezvous client's request/response handling).
 
 Pure stdlib, threaded. NOT for production — testbed only.
 """
+import collections
 import json
 import sys
 import threading
@@ -25,7 +26,7 @@ class Realm:
     def __init__(self, addresses):
         self.session_id = uuid.uuid4().hex
         self.addresses = addresses
-        self.event = None            # pending punch event for the server's poll
+        self.events = collections.deque()   # queued punch events (multi-client safe)
         self.event_cv = threading.Condition()
         self.attempts = {}           # nonce -> {addresses, cv, done}
 
@@ -88,8 +89,8 @@ class Handler(BaseHTTPRequestHandler):
             nonce, obfs = body["nonce"], body["obfs"]
             attempt = {"addresses": None, "cv": threading.Condition(), "done": False}
             r.attempts[nonce] = attempt
-            with r.event_cv:                    # hand event to server's events poll
-                r.event = {"addresses": body["addresses"], "nonce": nonce, "obfs": obfs}
+            with r.event_cv:                    # queue event for server's events poll
+                r.events.append({"addresses": body["addresses"], "nonce": nonce, "obfs": obfs})
                 r.event_cv.notify_all()
             with attempt["cv"]:                 # block <=10s for server's fresh addrs
                 if not attempt["done"]:
@@ -122,10 +123,9 @@ class Handler(BaseHTTPRequestHandler):
             if r is None:
                 return _err(self, 404, "realm_not_found")
             with r.event_cv:
-                if r.event is None:
+                if not r.events:
                     r.event_cv.wait(timeout=30)
-                ev = r.event
-                r.event = None
+                ev = r.events.popleft() if r.events else None
             if ev is None:
                 return _json(self, 200, {"event": "heartbeat_ack", "ttl": 60})
             return _json(self, 200, {"event": "punch", **ev})

@@ -49,7 +49,7 @@
 
 use std::time::Duration;
 
-pub use self::proxy_socket::ProxySocket;
+pub use self::proxy_socket::{ProxySocket, UdpSocketType};
 pub use compat::{DatagramReceive, DatagramReceiveExt, DatagramSend, DatagramSendExt, DatagramSocket};
 
 #[cfg(feature = "aead-cipher")]

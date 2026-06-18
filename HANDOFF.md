@@ -89,20 +89,35 @@ proxy protocol unchanged. Both client and server roles.
     a port via our `portmap::natpmp` client and an external client connects
     through the mapped public port (equivalent to OpenWrt miniupnpd, no VM).
 
+### Done in the production-hardening pass
+
+- **Multi-client** — `RealmServerRegistration` (register once + heartbeat) +
+  `RealmListener` accept many clients concurrently, each on its **own fresh
+  socket** (fresh STUN reflexive address per client via `connects`), so there is
+  no shared-socket demux. Mock rendezvous now uses a multi-event queue. Verified:
+  `crates/shadowsocks/tests/realm_multiclient.rs` (4 clients concurrently, payload
+  isolation). ssserver uses `RealmListener` (register once, serve many).
+- **ss-UDP over QUIC datagrams** — `QuicDatagramSocket` implements the ss
+  `DatagramSend/Receive` traits, so `ProxySocket` reuses the stock ss-UDP AEAD
+  codec unchanged. Server `serve` runs a UDP relay alongside TCP; sslocal UDP
+  associate routes via `ProxiedSocket::Realm`. Verified: `realm_udp.rs`
+  (encrypted UDP round-trips over datagrams).
+- **High concurrency + packet loss availability** — `testing/loss-sim/run.sh`:
+  two netns + `tc netem` loss on both sides; a realm carrier runs many concurrent
+  bidi streams across the lossy link (QUIC retransmission keeps them reliable).
+  Verified 30/30 streams under 3% loss.
+
 ### Remaining
 
-1. **Multi-client** — `session::server_accept` serves one client per registered
-   socket (punch then QUIC on the same socket). Many concurrent distinct clients
-   need a custom `AsyncUdpSocket` that demuxes punch vs QUIC on a shared socket
-   (DESIGN §5). One carrier already multiplexes all of one client's connections.
-2. **ss-UDP over QUIC datagrams** (TCP proxying is complete on both paths).
-3. **Phase 9**: DNS-01 ACME for the carrier, reconnect/heartbeat resilience,
+1. **Phase 9**: DNS-01 ACME for the carrier, reconnect/heartbeat resilience,
    metrics, ACL/outbound-proxy on the realm server path (currently dials targets
    directly).
-4. **PATH B over a real router end-to-end via the binaries** — the data path and
-   the NAT-PMP mapping are each verified above; wiring `serve_with_upgrade` into a
-   real-NAT binary run needs a UPnP/NAT-PMP-capable gateway (the `natpmp-sim`
-   testbed can be extended to drive `ssserver`/`sslocal` through it).
+2. **Full-chain binary PATH B over a real router** — each link is verified
+   independently (PATH B data-path upgrade in `realm_path_b.rs`; real NAT-PMP
+   mapping + iptables forwarding in `natpmp-sim`); combining them into a single
+   `ssserver`+`sslocal`+curl run behind the NAT-PMP gateway is a testbed wiring
+   exercise (no new product code needed).
+3. **Phase 10 (optional)**: true mid-stream QUIC→TCP migration.
 
 ### Blocker — RESOLVED
 

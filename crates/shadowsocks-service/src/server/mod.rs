@@ -248,10 +248,10 @@ async fn run_realm_server(
 ) -> io::Result<()> {
     use shadowsocks::context::Context;
     use shadowsocks::config::ServerType;
-    use shadowsocks::realm::RealmServer;
     use shadowsocks::realm::shadowsocks_realm::portmap::PortMapMethod;
     use shadowsocks::realm::shadowsocks_realm::session::ServerParams;
     use shadowsocks::realm::shadowsocks_realm::tls;
+    use shadowsocks::realm::{RealmListener, TcpUpgradeOpts};
 
     let context = Context::new_shared(ServerType::Server);
 
@@ -291,39 +291,29 @@ async fn run_realm_server(
         pin_hex
     );
 
-    loop {
-        let params = ServerParams {
-            rendezvous: realm_cfg.rendezvous.clone(),
-            stun_servers: realm_cfg.stun_servers.clone(),
-            cert: cert.clone(),
-            key: key.clone_key(),
-            lport: realm_cfg.lport,
-            punch_deadline: Duration::from_secs(10),
-        };
+    let params = ServerParams {
+        rendezvous: realm_cfg.rendezvous.clone(),
+        stun_servers: realm_cfg.stun_servers.clone(),
+        cert,
+        key,
+        lport: realm_cfg.lport,
+        punch_deadline: Duration::from_secs(10),
+    };
 
-        match RealmServer::accept(context.clone(), svr_cfg.clone(), params).await {
-            Ok(server) => {
-                log::info!("realm carrier established with a client; serving");
-                let serve_result = if realm_cfg.tcp_upgrade {
-                    server
-                        .serve_with_upgrade(
-                            tcp_upgrade_methods.clone(),
-                            realm_cfg.tcp_upgrade_external_port,
-                            7200,
-                        )
-                        .await
-                } else {
-                    server.serve().await
-                };
-                if let Err(err) = serve_result {
-                    log::debug!("realm carrier serve ended: {err}");
-                }
-                log::info!("realm carrier closed; re-registering");
-            }
-            Err(err) => {
-                log::warn!("realm accept failed: {err}; retrying in 2s");
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    }
+    let upgrade = if realm_cfg.tcp_upgrade {
+        Some(TcpUpgradeOpts {
+            methods: tcp_upgrade_methods,
+            external_port: realm_cfg.tcp_upgrade_external_port,
+            lease_secs: 7200,
+        })
+    } else {
+        None
+    };
+
+    // Register once, then accept many clients concurrently (each on its own
+    // socket/carrier). The registration is kept alive by an internal heartbeat.
+    let listener = RealmListener::bind(context, svr_cfg, params)
+        .await
+        .map_err(|e| io::Error::other(format!("realm register: {e}")))?;
+    listener.run(upgrade).await
 }
