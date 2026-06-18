@@ -10,7 +10,7 @@
 //! requires demultiplexing punch and QUIC packets on a shared socket — see the
 //! roadmap. For one client (and the integration tests) this is sufficient.
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -21,7 +21,7 @@ use crate::quic::{self, QuicCarrier};
 use crate::rendezvous::client::RendezvousClient;
 use crate::rendezvous::events::RendezvousEvent;
 use crate::rendezvous::types::ConnectBody;
-use crate::socket::PunchedSocket;
+use crate::socket::{self, PunchedSocket};
 use crate::url::RealmUrl;
 use crate::{random_session, stun};
 
@@ -66,18 +66,25 @@ pub struct ServerParams {
 async fn discover_addresses(socket: &UdpSocket, stun_servers: &[String]) -> Vec<String> {
     let bindings = stun::discover_all(socket, stun_servers).await;
 
-    // Detect symmetric NAT: different reflexive ports across STUN servers.
-    let ports: std::collections::BTreeSet<u16> =
-        bindings.iter().map(|b| b.reflexive.port()).collect();
-    if ports.len() > 1 {
-        log::warn!(
-            "realm: STUN reported DIFFERENT reflexive ports {ports:?} — this looks like a \
-             SYMMETRIC NAT / CGNAT, which P2P hole punching usually cannot traverse. A public-IP \
-             server or a direct-TCP (PATH B) path is required."
-        );
+    // Detect symmetric NAT: different reflexive ports across STUN servers *of the
+    // same family* (cross-family ports always differ and mean nothing here).
+    for family_v4 in [true, false] {
+        let ports: std::collections::BTreeSet<u16> = bindings
+            .iter()
+            .filter(|b| b.reflexive.is_ipv4() == family_v4)
+            .map(|b| b.reflexive.port())
+            .collect();
+        if ports.len() > 1 {
+            log::warn!(
+                "realm: STUN reported DIFFERENT reflexive ports {ports:?} for one address family \
+                 — this looks like a SYMMETRIC NAT / CGNAT, which P2P hole punching usually cannot \
+                 traverse. A public-IP server or a direct-TCP (PATH B) path is required."
+            );
+        }
     }
 
-    let mut addrs: Vec<String> = bindings.iter().map(|b| b.reflexive.to_string()).collect();
+    let mut addrs: Vec<String> =
+        bindings.iter().map(|b| socket::unmap(b.reflexive).to_string()).collect();
     addrs.sort();
     addrs.dedup();
 
@@ -103,7 +110,7 @@ pub async fn client_connect(params: ClientParams) -> Result<QuicCarrier> {
     stun_servers.extend(params.stun_servers.iter().cloned());
     let bind_port = params.lport.or(url.lport).unwrap_or(0);
 
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, bind_port)).await?;
+    let socket = socket::bind_realm_socket(bind_port)?;
     let addresses = discover_addresses(&socket, &stun_servers).await;
 
     let keys = random_session();
@@ -132,7 +139,7 @@ pub async fn server_accept(params: ServerParams) -> Result<QuicCarrier> {
     stun_servers.extend(params.stun_servers.iter().cloned());
     let bind_port = params.lport.or(url.lport).unwrap_or(0);
 
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, bind_port)).await?;
+    let socket = socket::bind_realm_socket(bind_port)?;
     let addresses = discover_addresses(&socket, &stun_servers).await;
 
     let rc = RendezvousClient::with_options(url, params.rendezvous_insecure)?;
@@ -186,7 +193,7 @@ impl RealmServerRegistration {
 
         // A socket only to learn an initial reflexive address for registration;
         // each accepted client later uses its own fresh socket.
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, bind_port)).await?;
+        let socket = socket::bind_realm_socket(bind_port)?;
         let addresses = discover_addresses(&socket, &stun_servers).await;
         drop(socket);
 
@@ -229,7 +236,7 @@ impl RealmServerRegistration {
     /// Complete one client's punch + QUIC handshake on a fresh socket. Safe to
     /// run concurrently for many clients (each uses its own socket).
     pub async fn handle_punch(&self, punch: ConnectBody) -> Result<QuicCarrier> {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+        let socket = socket::bind_realm_socket(0)?;
         let fresh = discover_addresses(&socket, &self.stun_servers).await;
         self.rc.post_connects(&self.session_id, &punch.nonce, fresh).await?;
 

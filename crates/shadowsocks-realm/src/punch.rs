@@ -159,11 +159,25 @@ pub async fn punch(
     let mut last_send: Option<Instant> = None;
     let mut confirmed: Option<SocketAddr> = None;
 
+    // Pre-map candidates to the socket's family: a dual-stack IPv6 socket must
+    // reach IPv4 peers via their IPv4-mapped form, and can only reach families
+    // it actually has (IPv4 peers are dropped on a v6-only socket, etc.).
+    let local_is_v6 = socket.local_addr().map(|a| a.is_ipv6()).unwrap_or(false);
+    let targets: Vec<SocketAddr> = peers
+        .iter()
+        .filter(|p| local_is_v6 || p.is_ipv4())
+        .map(|&p| crate::socket::map_to_socket_family(socket, p))
+        .collect();
+    if targets.is_empty() {
+        log::warn!("punch: no peer candidate matches local socket family ({peers:?})");
+        return Err(Error::PunchTimeout);
+    }
+
     while Instant::now() < end && confirmed.is_none() {
         let due = last_send.is_none_or(|t| t.elapsed() > Duration::from_millis(250));
         if due {
             let hello = encode(PunchType::Hello, nonce, obfs);
-            for &p in peers {
+            for &p in &targets {
                 let _ = socket.send_to(&hello, p).await;
             }
             last_send = Some(Instant::now());

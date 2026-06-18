@@ -166,9 +166,11 @@ pub async fn discover(
 ) -> Result<SocketAddr> {
     let (req, txid) = binding_request();
     let mut buf = [0u8; 1500];
+    // A dual-stack socket reaches IPv4 STUN servers via their IPv4-mapped form.
+    let dst = crate::socket::map_to_socket_family(socket, server);
 
     for _ in 0..retries.max(1) {
-        socket.send_to(&req, server).await?;
+        socket.send_to(&req, dst).await?;
         let deadline = tokio::time::Instant::now() + per_try;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -190,29 +192,80 @@ pub async fn discover(
     Err(Error::Stun(format!("no STUN response from {server}")))
 }
 
-/// Resolve a `host:port` string and discover the reflexive address from it.
-pub async fn discover_addr(socket: &UdpSocket, server: &str) -> Result<SocketAddr> {
-    let resolved = tokio::net::lookup_host(server)
-        .await
-        .map_err(|e| Error::Stun(format!("resolving {server}: {e}")))?
-        .next()
-        .ok_or_else(|| Error::Stun(format!("no addresses for {server}")))?;
-    discover(socket, resolved, 5, Duration::from_secs(1)).await
+/// Which address families a socket can reach for STUN.
+///
+/// A dual-stack IPv6 socket can reach **both** families (IPv4 via IPv4-mapped
+/// addressing); a plain IPv4 socket can reach only IPv4; a v6-only socket only
+/// IPv6. Sending to a family the socket cannot reach fails instantly and looks
+/// like "STUN blocked", so candidates must be filtered to reachable families.
+fn reachable_families(socket: &UdpSocket) -> (bool, bool) {
+    match socket.local_addr() {
+        // We always create IPv6 sockets as dual-stack (see `bind_realm_socket`).
+        Ok(a) if a.is_ipv6() => (true, true),
+        _ => (true, false),
+    }
 }
 
-/// Query several STUN servers (by `host:port`) over the same socket, returning
-/// every successful binding. The set of reflexive ports reveals NAT behaviour:
-/// identical ports across servers ⇒ endpoint-independent (cone) mapping;
-/// differing ports ⇒ symmetric NAT.
+/// Resolve a `host:port` string and discover the reflexive address from it,
+/// trying each resolved address the socket can reach (dual-stack first tries the
+/// family that resolves first, then the other) until one answers.
+pub async fn discover_addr(socket: &UdpSocket, server: &str) -> Result<SocketAddr> {
+    let (v4_ok, v6_ok) = reachable_families(socket);
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(server)
+        .await
+        .map_err(|e| Error::Stun(format!("resolving {server}: {e}")))?
+        .filter(|a| if a.is_ipv4() { v4_ok } else { v6_ok })
+        .collect();
+    if resolved.is_empty() {
+        return Err(Error::Stun(format!("no reachable address for {server}")));
+    }
+    let mut last = Error::Stun(format!("no STUN response from {server}"));
+    for addr in resolved {
+        match discover(socket, addr, 5, Duration::from_secs(1)).await {
+            Ok(sa) => return Ok(sa),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Query STUN servers (by `host:port`) over the same socket, returning the
+/// reflexive bindings. On a dual-stack socket this learns BOTH an IPv4 and an
+/// IPv6 reflexive address (one per family) so the peer — whatever its own
+/// stack — has a reachable candidate. The set of reflexive ports within a family
+/// reveals NAT behaviour (identical ⇒ cone; differing ⇒ symmetric).
 pub async fn discover_all(socket: &UdpSocket, servers: &[String]) -> Vec<StunBinding> {
+    let (v4_ok, v6_ok) = reachable_families(socket);
     let mut out = Vec::new();
+    let mut have_v4 = false;
+    let mut have_v6 = false;
     for s in servers {
-        let resolved = match tokio::net::lookup_host(s).await.ok().and_then(|mut it| it.next()) {
-            Some(a) => a,
-            None => continue,
+        // Once we hold a binding for every reachable family, stop (avoids
+        // wasting a full timeout on an extra, redundant STUN server).
+        if (have_v4 || !v4_ok) && (have_v6 || !v6_ok) {
+            break;
+        }
+        let resolved: Vec<SocketAddr> = match tokio::net::lookup_host(s).await {
+            Ok(it) => it.collect(),
+            Err(_) => continue,
         };
-        if let Ok(reflexive) = discover(socket, resolved, 5, Duration::from_secs(1)).await {
-            out.push(StunBinding { server: resolved, reflexive });
+        for addr in resolved {
+            let fam_ok = if addr.is_ipv4() { v4_ok } else { v6_ok };
+            if !fam_ok {
+                continue;
+            }
+            // Skip a family we already have a reflexive address for.
+            if (addr.is_ipv4() && have_v4) || (addr.is_ipv6() && have_v6) {
+                continue;
+            }
+            if let Ok(reflexive) = discover(socket, addr, 5, Duration::from_secs(1)).await {
+                if reflexive.is_ipv4() {
+                    have_v4 = true;
+                } else {
+                    have_v6 = true;
+                }
+                out.push(StunBinding { server: addr, reflexive });
+            }
         }
     }
     out
