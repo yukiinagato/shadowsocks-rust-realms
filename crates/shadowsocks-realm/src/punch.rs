@@ -172,18 +172,27 @@ pub async fn punch(
         match timeout(Duration::from_millis(200), socket.recv_from(&mut buf)).await {
             Ok(Ok((n, src))) => match decode(&buf[..n], nonce, obfs) {
                 Ok((PunchType::Hello, _)) => {
+                    log::debug!("punch: got Hello from {src}, replying Ack");
                     let ack = encode(PunchType::Ack, nonce, obfs);
                     let _ = socket.send_to(&ack, src).await;
                 }
-                Ok((PunchType::Ack, _)) => confirmed = Some(src),
-                Err(_) => {} // not a valid punch packet for us; ignore
+                Ok((PunchType::Ack, _)) => {
+                    log::debug!("punch: got Ack from {src} — hole OPEN");
+                    confirmed = Some(src);
+                }
+                Err(_) => {
+                    log::trace!("punch: discarded {n}B from {src} (not a punch packet for us)");
+                }
             },
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {} // recv timed out; loop to maybe resend
         }
     }
 
-    let peer = confirmed.ok_or(Error::PunchTimeout)?;
+    let peer = confirmed.ok_or_else(|| {
+        log::warn!("punch: timed out — no Ack received from any of {peers:?}");
+        Error::PunchTimeout
+    })?;
     let ack = encode(PunchType::Ack, nonce, obfs);
     for _ in 0..5 {
         let _ = socket.send_to(&ack, peer).await;

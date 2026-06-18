@@ -64,17 +64,34 @@ pub struct ServerParams {
 }
 
 async fn discover_addresses(socket: &UdpSocket, stun_servers: &[String]) -> Vec<String> {
-    let mut addrs: Vec<String> = stun::discover_all(socket, stun_servers)
-        .await
-        .iter()
-        .map(|b| b.reflexive.to_string())
-        .collect();
+    let bindings = stun::discover_all(socket, stun_servers).await;
+
+    // Detect symmetric NAT: different reflexive ports across STUN servers.
+    let ports: std::collections::BTreeSet<u16> =
+        bindings.iter().map(|b| b.reflexive.port()).collect();
+    if ports.len() > 1 {
+        log::warn!(
+            "realm: STUN reported DIFFERENT reflexive ports {ports:?} — this looks like a \
+             SYMMETRIC NAT / CGNAT, which P2P hole punching usually cannot traverse. A public-IP \
+             server or a direct-TCP (PATH B) path is required."
+        );
+    }
+
+    let mut addrs: Vec<String> = bindings.iter().map(|b| b.reflexive.to_string()).collect();
     addrs.sort();
     addrs.dedup();
-    if addrs.is_empty()
-        && let Ok(local) = socket.local_addr()
-    {
-        addrs.push(local.to_string());
+
+    if addrs.is_empty() {
+        let local = socket.local_addr().ok();
+        log::warn!(
+            "realm: STUN found NO reflexive address (stun_servers={stun_servers:?}); UDP to STUN \
+             may be blocked. Hole punching across NAT will fail. Falling back to {local:?}"
+        );
+        if let Some(local) = local {
+            addrs.push(local.to_string());
+        }
+    } else {
+        log::info!("realm: STUN reflexive address(es): {addrs:?}");
     }
     addrs
 }
@@ -100,9 +117,11 @@ pub async fn client_connect(params: ClientParams) -> Result<QuicCarrier> {
         .await?;
 
     let peer_addrs = parse_addrs(&peer.addresses)?;
+    log::info!("realm client: punching toward server {peer_addrs:?}");
     let punched =
         PunchedSocket::connect(socket, &peer_addrs, &keys.nonce, &keys.obfs, params.punch_deadline)
             .await?;
+    log::info!("realm client: hole punched to {}", punched.peer());
     quic::connect_client(punched, params.tls).await
 }
 
@@ -217,8 +236,10 @@ impl RealmServerRegistration {
         let nonce = decode_n::<16>(&punch.nonce, "nonce")?;
         let obfs = decode_n::<32>(&punch.obfs, "obfs")?;
         let peer_addrs = parse_addrs(&punch.addresses)?;
+        log::info!("realm server: punching toward client {peer_addrs:?}");
         let punched =
             PunchedSocket::connect(socket, &peer_addrs, &nonce, &obfs, self.punch_deadline).await?;
+        log::info!("realm server: hole punched to {}", punched.peer());
         quic::accept_server(punched, self.cert.clone(), self.key.clone_key()).await
     }
 
