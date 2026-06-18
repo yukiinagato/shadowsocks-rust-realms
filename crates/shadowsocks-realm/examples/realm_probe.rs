@@ -28,6 +28,7 @@ async fn main() {
                 stun_servers: vec![stun],
                 cert,
                 key,
+                rendezvous_insecure: false,
                 lport: None,
                 punch_deadline: Duration::from_secs(10),
             })
@@ -51,6 +52,7 @@ async fn main() {
                 rendezvous,
                 stun_servers: vec![stun],
                 tls: ClientTls::Insecure,
+                rendezvous_insecure: true,
                 lport: None,
                 punch_deadline: Duration::from_secs(10),
             })

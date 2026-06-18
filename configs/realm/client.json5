@@ -24,8 +24,11 @@
     // QUIC carrier TLS. Either pin the server's self-signed certificate
     // (recommended; the 64-hex pin is printed by the server on startup):
     "quic_tls": { "pin_sha256": "64_HEX_SHA256_OF_SERVER_CERT" },
-    // ...or skip certificate verification entirely (the shadowsocks AEAD layer
-    // is still the real end-to-end authentication). `pin_sha256` takes priority.
+    // ...or skip certificate verification entirely. This disables verification
+    // for BOTH the QUIC carrier AND the rendezvous HTTPS (`realm://`) connection,
+    // so it also covers a self-signed Go hysteria-realm-server. The shadowsocks
+    // AEAD layer remains the real end-to-end authentication. `pin_sha256` takes
+    // priority for the QUIC carrier when both are present.
     //   "quic_tls": { "insecure": true },
     "prefer_tcp": true                       // accept PATH B (direct-TCP) upgrades
   }

@@ -296,6 +296,7 @@ async fn run_realm_server(
         stun_servers: realm_cfg.stun_servers.clone(),
         cert,
         key,
+        rendezvous_insecure: realm_cfg.insecure,
         lport: realm_cfg.lport,
         punch_deadline: Duration::from_secs(10),
     };

@@ -38,8 +38,21 @@ impl RendezvousClient {
     /// direct (and the test mock runs on loopback), matching the reference
     /// peer's behaviour.
     pub fn new(url: RealmUrl) -> Result<Self> {
-        let http = Client::builder()
-            .no_proxy()
+        Self::with_options(url, false)
+    }
+
+    /// Like [`new`](Self::new) but, when `insecure` is set, skips TLS
+    /// certificate verification for the rendezvous HTTPS connection — the
+    /// counterpart of the carrier's `insecure` mode, for a self-hosted Go
+    /// `hysteria-realm-server` using a self-signed certificate over `realm://`.
+    pub fn with_options(url: RealmUrl, insecure: bool) -> Result<Self> {
+        let mut builder = Client::builder().no_proxy();
+        if insecure {
+            builder = builder
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true);
+        }
+        let http = builder
             .build()
             .map_err(|e| Error::Rendezvous(format!("building http client: {e}")))?;
         let base = url.base_http_url();

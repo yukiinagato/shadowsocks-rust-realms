@@ -202,6 +202,7 @@ impl ServerIdent {
             rendezvous: realm_cfg.rendezvous.clone(),
             stun_servers: realm_cfg.stun_servers.clone(),
             tls,
+            rendezvous_insecure: realm_cfg.insecure,
             lport: realm_cfg.lport,
             punch_deadline: Duration::from_secs(10),
         };

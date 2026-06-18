@@ -35,6 +35,9 @@ pub struct ClientParams {
     /// How to verify the QUIC carrier certificate (pin its SHA-256, or accept
     /// any in `Insecure` mode).
     pub tls: crate::quic::ClientTls,
+    /// Skip TLS verification for the **rendezvous HTTPS** connection too (for a
+    /// self-signed `realm://` server). HTTP (`realm+http://`) ignores this.
+    pub rendezvous_insecure: bool,
     /// Optional fixed local UDP port.
     pub lport: Option<u16>,
     /// Punch deadline.
@@ -51,6 +54,9 @@ pub struct ServerParams {
     pub cert: CertificateDer<'static>,
     /// The carrier private key.
     pub key: PrivateKeyDer<'static>,
+    /// Skip TLS verification for the **rendezvous HTTPS** connection (for a
+    /// self-signed `realm://` server). HTTP (`realm+http://`) ignores this.
+    pub rendezvous_insecure: bool,
     /// Optional fixed local UDP port.
     pub lport: Option<u16>,
     /// Punch deadline.
@@ -84,7 +90,7 @@ pub async fn client_connect(params: ClientParams) -> Result<QuicCarrier> {
     let addresses = discover_addresses(&socket, &stun_servers).await;
 
     let keys = random_session();
-    let rc = RendezvousClient::new(url)?;
+    let rc = RendezvousClient::with_options(url, params.rendezvous_insecure)?;
     let peer = rc
         .connect(&ConnectBody {
             addresses,
@@ -110,7 +116,7 @@ pub async fn server_accept(params: ServerParams) -> Result<QuicCarrier> {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, bind_port)).await?;
     let addresses = discover_addresses(&socket, &stun_servers).await;
 
-    let rc = RendezvousClient::new(url)?;
+    let rc = RendezvousClient::with_options(url, params.rendezvous_insecure)?;
     let reg = rc.register(addresses).await?;
     let session_id = reg.session_id;
 
@@ -165,7 +171,7 @@ impl RealmServerRegistration {
         let addresses = discover_addresses(&socket, &stun_servers).await;
         drop(socket);
 
-        let rc = RendezvousClient::new(url)?;
+        let rc = RendezvousClient::with_options(url, params.rendezvous_insecure)?;
         let reg = rc.register(addresses).await?;
         let session_id = reg.session_id;
         let ttl = reg.ttl.max(10);
