@@ -17,3 +17,7 @@ target
 # Python testbed caches
 __pycache__/
 *.pyc
+
+# local realm configs with private rendezvous token/IP — never commit
+realm-client.json5
+realm-server.json5
